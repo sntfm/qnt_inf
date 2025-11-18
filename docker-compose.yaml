@@ -1,0 +1,12 @@
+version: "3.8"
+services:
+  questdb:
+    image: questdb/questdb:latest
+    container_name: questdb
+    ports:
+      - "9000:9000"    # Web console
+      - "8812:8812"    # Postgres wire protocol
+      - "9009:9009"    # ILP line protocol
+    volumes:
+      - ./data/questdb:/root/.questdb/db
+    restart: unless-stopped

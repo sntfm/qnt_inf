@@ -1,0 +1,46 @@
+version: "3.8"
+
+services:
+  questdb:
+    image: questdb/questdb:latest
+    container_name: questdb
+    environment:
+      - ILP_ENABLED=true
+      - ILP_BIND=0.0.0.0
+      - ILP_PORT=9009
+    ports:
+      - "9000:9000"     # Web console
+      - "8812:8812"     # Postgres wire protocol
+      - "9009:9009"     # ILP line protocol (TCP)
+    volumes:
+      - /home/ubuntu/qdb_data:/var/lib/questdb
+    restart: unless-stopped
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    depends_on:
+      - questdb
+    ports:
+      - "3000:3000"       # Grafana UI
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+    volumes:
+      - grafana_data:/var/lib/grafana
+    restart: unless-stopped
+  streamlit:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: streamlit
+    ports:
+      - "8501:8501"       # Streamlit UI
+    environment:
+      - QDB_HTTP=${QDB_HTTP:-http://16.171.14.188:9000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  grafana_data: {}
+
