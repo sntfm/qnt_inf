@@ -265,12 +265,6 @@ def _stat_table(df: pd.DataFrame) -> html.Div:
     return html.Div(
         html.Table(
             [
-                html.Thead(
-                    html.Tr([
-                        html.Th("Metric", style=table_header_style),
-                        html.Th("Value", style=table_header_style),
-                    ])
-                ),
                 html.Tbody(table_rows),
             ],
             style={
