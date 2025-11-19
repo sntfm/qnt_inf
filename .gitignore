@@ -50,7 +50,7 @@ data/*.json
 data/md/
 data/internal_engine/
 data/
-
+dev/*.html
 
 # Logs
 *.log
