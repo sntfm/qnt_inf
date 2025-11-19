@@ -50,7 +50,7 @@ data/*.json
 data/md/
 data/internal_engine/
 data/
-plotter/*.html
+PnlDecay-2025-10-27-return.html
 
 # Logs
 *.log
