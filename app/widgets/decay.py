@@ -18,9 +18,7 @@ def get_widget_layout(n_intervals):
     """
     return html.Div([
         html.Div([
-            html.H3("Decay Widget - Coming Soon",
+            html.H3("Decay/Markouts Widget Placeholder",
                    style={'textAlign': 'center', 'color': '#7f8c8d', 'marginBottom': '10px'}),
-            html.P("This widget will display PnL decay metrics and visualizations.",
-                  style={'textAlign': 'center', 'color': '#95a5a6'}),
         ], style={'padding': '40px', 'backgroundColor': '#f8f9fa', 'borderRadius': '8px'})
     ])

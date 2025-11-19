@@ -55,8 +55,6 @@ def _run_query(sql: str, params: Sequence = ()) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 # Data helpers
 # ---------------------------------------------------------------------------
-from datetime import datetime, time, timezone
-
 def _normalized_date_bounds(date_str: Optional[str]):
     if date_str:
         target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -73,8 +71,6 @@ def _normalized_date_bounds(date_str: Optional[str]):
     print(f"[DEBUG] start_us={start_us}, end_us={end_us}")
 
     return start_us, end_us, target_date.isoformat()
-
-
 
 
 def _fetch_latency_sample(
@@ -220,8 +216,8 @@ def _build_histogram(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def _stat_cards(df: pd.DataFrame) -> html.Div:
-    """Render small cards with summary statistics (overall across all hours)."""
+def _stat_table(df: pd.DataFrame) -> html.Div:
+    """Render a statistics table."""
     weights = df["bin_count"].to_numpy()
     values = df["latency_ms"].to_numpy()
     sample_count = int(weights.sum())
@@ -234,39 +230,117 @@ def _stat_cards(df: pd.DataFrame) -> html.Div:
         median_val = _weighted_quantile(values, weights, 0.5)
         p95_val = _weighted_quantile(values, weights, 0.95)
 
-    card_style = {
-        "padding": "12px 16px",
-        "backgroundColor": "#f5f7fa",
-        "borderRadius": "8px",
-        "minWidth": "160px",
-        "boxShadow": "0 1px 2px rgba(0,0,0,0.06)",
-    }
-
     def fmt(value: float) -> str:
         return f"{value:.2f} ms"
 
-    cards = [
-        html.Div([html.Small("Samples"), html.H4(f"{sample_count:,}")], style=card_style),
-        html.Div([html.Small("Hours"), html.H4(f"{num_hours}")], style=card_style),
-        html.Div([html.Small("Mean"), html.H4(fmt(mean_val))], style=card_style),
-        html.Div([html.Small("Median"), html.H4(fmt(median_val))], style=card_style),
-        html.Div([html.Small("P95"), html.H4(fmt(p95_val))], style=card_style),
+    table_header_style = {
+        "padding": "12px",
+        "textAlign": "left",
+        "borderBottom": "2px solid #e0e0e0",
+        "fontWeight": "600",
+        "color": "#2c3e50",
+        "backgroundColor": "#f5f7fa",
+    }
+
+    table_cell_style = {
+        "padding": "12px",
+        "borderBottom": "1px solid #e0e0e0",
+    }
+
+    stats_data = [
+        ("Samples", f"{sample_count:,}"),
+        ("Mean", fmt(mean_val)),
+        ("Median", fmt(median_val)),
+        ("P95", fmt(p95_val)),
     ]
-    return html.Div(cards, style={"display": "flex", "gap": "16px", "flexWrap": "wrap"})
+
+    table_rows = [
+        html.Tr([
+            html.Td(stat_name, style=table_cell_style),
+            html.Td(stat_value, style={**table_cell_style, "fontWeight": "400"}),
+        ])
+        for stat_name, stat_value in stats_data
+    ]
+
+    return html.Div(
+        html.Table(
+            [
+                html.Thead(
+                    html.Tr([
+                        html.Th("Metric", style=table_header_style),
+                        html.Th("Value", style=table_header_style),
+                    ])
+                ),
+                html.Tbody(table_rows),
+            ],
+            style={
+                "width": "100%",
+                "borderCollapse": "collapse",
+                "backgroundColor": "#ffffff",
+                "borderRadius": "8px",
+                "overflow": "hidden",
+                "boxShadow": "0 1px 3px rgba(0,0,0,0.1)",
+            }
+        ),
+        style={"minWidth": "200px"}
+    )
 
 
 # ---------------------------------------------------------------------------
 # Public API used by Dash app
 # ---------------------------------------------------------------------------
 def create_filter_controls(table_name: str) -> html.Div:
-    """Return static filter controls for the latency widget."""
-    default_date = datetime.now(timezone.utc).date().isoformat()
+    """Return empty div - filters are now integrated into the widget."""
+    return html.Div()
 
-    return html.Div(
+
+def get_widget_content(
+    date_str: Optional[str],
+    table_name: str,
+) -> html.Div:
+    """Return the latency histogram layout."""
+    df = _fetch_latency_sample(table_name, date_str)
+
+    # Create empty figure or histogram based on data availability
+    if df.empty:
+        fig = go.Figure()
+        fig.update_layout(
+            margin=dict(l=40, r=20, t=60, b=40),
+            template="plotly_white",
+            xaxis_title="Latency (ms)",
+            yaxis_title="Count",
+            xaxis=dict(range=[0, MAX_LATENCY_MS]),
+            yaxis=dict(range=[0, 100]),
+            annotations=[
+                dict(
+                    text="No data available for selected date",
+                    xref="paper",
+                    yref="paper",
+                    x=0.5,
+                    y=0.5,
+                    showarrow=False,
+                    font=dict(size=14, color="#7f8c8d"),
+                )
+            ],
+        )
+        # Create empty stats for display
+        stats_component = html.Div(
+            html.P("No data", style={"color": "#7f8c8d", "textAlign": "center", "padding": "20px"}),
+        )
+    else:
+        fig = _build_histogram(df)
+        stats_component = _stat_table(df)
+
+    # Default date for picker
+    default_date = datetime.now(timezone.utc).date().isoformat()
+    if date_str:
+        default_date = date_str
+
+    # Right panel with date picker, apply button, and stats
+    right_panel = html.Div(
         [
             html.Div(
                 [
-                    html.Label("Date", style={"fontWeight": "600"}),
                     dcc.DatePickerSingle(
                         id="latency-date-input",
                         min_date_allowed=date(2020, 1, 1),
@@ -278,80 +352,42 @@ def create_filter_controls(table_name: str) -> html.Div:
                         persistence_type="memory",
                     ),
                 ],
-                style={"flex": "1"},
+                style={"marginBottom": "12px"},
             ),
-            html.Div(
-                [
-                    html.Button(
-                        "Apply",
-                        id="latency-apply-button",
-                        n_clicks=0,
-                        style={
-                            "width": "100%",
-                            "height": "46px",
-                            "backgroundColor": "#3498db",
-                            "color": "#fff",
-                            "border": "none",
-                            "borderRadius": "6px",
-                            "fontWeight": "600",
-                        },
-                    )
-                ],
-                style={"flex": "0.5", "alignSelf": "flex-end"},
+            html.Button(
+                "Apply",
+                id="latency-apply-button",
+                n_clicks=0,
+                style={
+                    "width": "100%",
+                    "height": "40px",
+                    "backgroundColor": "#3498db",
+                    "color": "#fff",
+                    "border": "none",
+                    "borderRadius": "6px",
+                    "fontWeight": "600",
+                    "cursor": "pointer",
+                    "marginBottom": "20px",
+                },
             ),
+            html.Hr(style={"border": "none", "borderTop": "1px solid #e0e0e0", "margin": "20px 0"}),
+            stats_component,
         ],
-        style={
-            "display": "flex",
-            "gap": "16px",
-            "flexWrap": "wrap",
-            "backgroundColor": "#ffffff",
-            "padding": "16px",
-            "borderRadius": "10px",
-            "boxShadow": "0 2px 6px rgba(0,0,0,0.08)",
-            "marginBottom": "18px",
-        },
+        style={"width": "280px", "marginLeft": "20px"},
     )
-
-
-def get_widget_content(
-    date: Optional[str],
-    table_name: str,
-) -> html.Div:
-    """Return the latency histogram layout."""
-    df = _fetch_latency_sample(table_name, date)
-
-    if df.empty:
-        return html.Div(
-            [
-                html.P(
-                    "No latency samples found for the selected date.",
-                    style={"color": "#7f8c8d"},
-                )
-            ],
-            style={
-                "backgroundColor": "#fff",
-                "padding": "40px",
-                "borderRadius": "10px",
-                "boxShadow": "0 2px 6px rgba(0,0,0,0.05)",
-                "textAlign": "center",
-            },
-        )
-
-    fig = _build_histogram(df)
 
     return html.Div(
         [
             html.Div(
                 [
-                    html.H3(
-                        f"Latency histogram · {df['date_str'].iloc[0]}",
-                        style={"marginBottom": "12px", "color": "#2c3e50"},
+                    html.Div(
+                        dcc.Graph(id="latency-histogram", figure=fig, config={"displaylogo": False}),
+                        style={"flex": "1", "minWidth": "0"},
                     ),
-                    _stat_cards(df),
+                    right_panel,
                 ],
-                style={"marginBottom": "16px"},
+                style={"display": "flex", "alignItems": "flex-start"},
             ),
-            dcc.Graph(id="latency-histogram", figure=fig, config={"displaylogo": False}),
         ],
         style={
             "backgroundColor": "#ffffff",

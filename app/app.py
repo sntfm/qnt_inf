@@ -28,15 +28,11 @@ app.layout = html.Div([
 def get_main_layout():
     """Layout for the main dashboard showing latency and decay widgets."""
     return html.Div([
-        html.Div([
-            html.H2("Quant Mission Control",
-                   style={'textAlign': 'center', 'color': '#2c3e50', 'marginBottom': 30}),
-        ]),
 
         # Container for latency widget
         html.Div([
-            html.H2("Latency Metrics",
-                   style={'color': '#34495e', 'borderBottom': '2px solid #3498db', 'paddingBottom': 10}),
+            html.H2("Latency",
+                   style={'color': '#34495e', 'borderBottom': '2px solid', 'paddingBottom': 5}),
 
             # Filter controls container (separate, won't be re-rendered)
             html.Div(id='latency-controls-container'),
@@ -47,8 +43,8 @@ def get_main_layout():
 
         # Container for decay widget
         html.Div([
-            html.H2("Decay Metrics",
-                   style={'color': '#34495e', 'borderBottom': '2px solid #e74c3c', 'paddingBottom': 10}),
+            html.H2("Decay/Markouts",
+                   style={'color': '#34495e', 'borderBottom': '2px solid', 'paddingBottom': 5}),
             html.Div(id='decay-widget-container'),
         ], style={'marginBottom': 40}),
 
@@ -59,16 +55,8 @@ def get_main_layout():
             n_intervals=0
         ),
 
-        # Footer with links
-        html.Div([
-            html.Hr(),
-            html.A('View in Grafana',
-                  href='/grafana',
-                  style={'fontSize': 16, 'marginRight': 20}),
-            html.Span('| ', style={'color': '#95a5a6'}),
-            html.Span('Data Source: QuestDB',
-                     style={'fontSize': 14, 'color': '#7f8c8d', 'marginLeft': 20}),
-        ], style={'textAlign': 'center', 'marginTop': 40, 'padding': 20})
+        # Footer goes below
+
 
     ], style={
         'fontFamily': 'Arial, sans-serif',
@@ -129,7 +117,7 @@ def initialize_latency_widget(pathname):
     if pathname == '/app':
         try:
             # Load widget content with default settings (today's date)
-            return latency.get_widget_content(date=None, table_name="feed_kraken_tob_5")
+            return latency.get_widget_content(date_str=None, table_name="feed_kraken_tob_5")
         except Exception as e:
             import traceback
             return html.Div([
@@ -152,7 +140,7 @@ def update_latency_filters(n_clicks, date):
     try:
         print(f"[DEBUG] update_latency_filters called with n_clicks={n_clicks}, date={date}")
         # Use get_widget_content to update only the data, not the controls
-        return latency.get_widget_content(date=date, table_name="feed_kraken_tob_5")
+        return latency.get_widget_content(date_str=date, table_name="feed_kraken_tob_5")
     except Exception as e:
         import traceback
         print(f"Error in update_latency_filters: {e}")
