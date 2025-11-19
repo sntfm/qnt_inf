@@ -173,6 +173,35 @@ def _build_histogram(df: pd.DataFrame) -> go.Figure:
             )
         )
 
+    # Calculate overall mean and median across all hours
+    weights = df["bin_count"].to_numpy()
+    values = df["latency_ms"].to_numpy()
+    sample_count = int(weights.sum())
+
+    if sample_count > 0:
+        mean_val = float(np.average(values, weights=weights))
+        median_val = _weighted_quantile(values, weights, 0.5)
+
+        # Add mean vertical line
+        fig.add_vline(
+            x=mean_val,
+            line_dash="dash",
+            line_color="red",
+            line_width=2,
+            annotation_text=f"Mean: {mean_val:.2f} ms",
+            annotation_position="top",
+        )
+
+        # Add median vertical line
+        fig.add_vline(
+            x=median_val,
+            line_dash="dot",
+            line_color="blue",
+            line_width=2,
+            annotation_text=f"Median: {median_val:.2f} ms",
+            annotation_position="top",
+        )
+
     fig.update_layout(
         margin=dict(l=40, r=20, t=60, b=40),
         template="plotly_white",
