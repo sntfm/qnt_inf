@@ -10,3 +10,17 @@ services:
     volumes:
       - ./data/questdb:/root/.questdb/db
     restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: grafana
+    ports:
+      - "3000:3000"    # Grafana web UI
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+    volumes:
+      - ./data/grafana:/var/lib/grafana
+    restart: unless-stopped
+    depends_on:
+      - questdb
