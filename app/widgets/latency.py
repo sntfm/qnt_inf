@@ -27,7 +27,7 @@ QUESTDB_USER = os.getenv("QUESTDB_USER", "admin")
 QUESTDB_PASSWORD = os.getenv("QUESTDB_PASSWORD", "quest")
 QUESTDB_DB = os.getenv("QUESTDB_DB", "qdb")
 LATENCY_SAMPLE_TABLE = os.getenv("LATENCY_WIDGET_SAMPLE_TABLE", "feed_kraken_tob_5")
-BIN_SIZE_MS = float(os.getenv("LATENCY_WIDGET_BIN_MS", "5"))
+BIN_SIZE_MS = float(os.getenv("LATENCY_WIDGET_BIN_MS", "2"))
 MAX_LATENCY_MS = float(os.getenv("LATENCY_WIDGET_MAX_MS", "200"))
 
 
@@ -84,8 +84,8 @@ def _fetch_latency_sample(
     """
     Fetch latency histogram bins (already aggregated) directly from QuestDB.
 
-    Returns a DataFrame with one row per latency bin:
-        latency_bin_start_ms, bin_count, latency_ms (bin center), date_str
+    Returns a DataFrame with one row per latency bin and hour:
+        hour, latency_bin_start_ms, bin_count, latency_ms (bin center), date_str
     """
     print(f"[DEBUG] _fetch_latency_sample called with table_name={table_name}, date_str={date_str}")
     start_us, end_us, normalized = _normalized_date_bounds(date_str)
@@ -97,17 +97,20 @@ def _fetch_latency_sample(
 
     sql = f"""
         WITH samples AS (
-            SELECT {latency_expr} AS latency_ms
+            SELECT
+                {latency_expr} AS latency_ms,
+                EXTRACT(HOUR FROM to_timezone(ts_server, 'UTC')) AS hour
             FROM {table_name}
             WHERE ts_server BETWEEN %s AND %s
         )
         SELECT
+            hour,
             FLOOR(latency_ms / %s) * %s AS latency_bin_start_ms,
             COUNT(*) AS bin_count
         FROM samples
         WHERE latency_ms >= 0 AND latency_ms <= %s
-        GROUP BY latency_bin_start_ms
-        ORDER BY latency_bin_start_ms
+        GROUP BY hour, latency_bin_start_ms
+        ORDER BY hour, latency_bin_start_ms
     """
 
     df = _run_query(sql, params)
@@ -115,9 +118,10 @@ def _fetch_latency_sample(
     if df.empty:
         return df
 
+    df["hour"] = pd.to_numeric(df["hour"], errors="coerce").astype(int)
     df["latency_bin_start_ms"] = pd.to_numeric(df["latency_bin_start_ms"], errors="coerce")
     df["bin_count"] = pd.to_numeric(df["bin_count"], errors="coerce").fillna(0).astype(int)
-    df.dropna(subset=["latency_bin_start_ms"], inplace=True)
+    df.dropna(subset=["latency_bin_start_ms", "hour"], inplace=True)
     df["latency_ms"] = df["latency_bin_start_ms"] + BIN_SIZE_MS / 2.0
     df["date_str"] = normalized
     return df
@@ -138,56 +142,61 @@ def _weighted_quantile(values: np.ndarray, weights: np.ndarray, quantile: float)
 
 
 def _build_histogram(df: pd.DataFrame) -> go.Figure:
-    """Create histogram figure using pre-aggregated bins."""
-    values = df["latency_ms"].to_numpy()
-    weights = df["bin_count"].to_numpy()
-    total_weight = weights.sum()
-    if total_weight == 0:
-        mean_val = median_val = 0.0
-    else:
-        mean_val = float(np.average(values, weights=weights))
-        median_val = _weighted_quantile(values, weights, 0.5)
+    """Create histogram figure with separate traces for each hour using magma palette."""
+    import plotly.express as px
 
-    fig = go.Figure(
-        go.Bar(
-            x=df["latency_ms"],
-            y=df["bin_count"],
-            width=BIN_SIZE_MS,
-            name="Latency",
-            marker=dict(color="#1f77b4"),
-            opacity=0.85,
+    fig = go.Figure()
+
+    # Get magma colors from plotly (24 colors for 24 hours)
+    magma_colors = px.colors.sequential.Magma
+    # Expand to 24 colors by sampling
+    n_hours = 24
+    color_indices = [int(i * (len(magma_colors) - 1) / (n_hours - 1)) for i in range(n_hours)]
+    hour_colors = [magma_colors[i] for i in color_indices]
+
+    # Group by hour
+    hours = sorted(df["hour"].unique())
+
+    for hour in hours:
+        hour_df = df[df["hour"] == hour].copy()
+        values = hour_df["latency_ms"].to_numpy()
+        weights = hour_df["bin_count"].to_numpy()
+
+        fig.add_trace(
+            go.Bar(
+                x=hour_df["latency_ms"],
+                y=hour_df["bin_count"],
+                width=BIN_SIZE_MS,
+                name=f"{int(hour):02d}:00",
+                marker=dict(color=hour_colors[int(hour)]),
+                opacity=0.7,
+            )
         )
-    )
-    fig.add_vline(
-        x=mean_val,
-        line_dash="dash",
-        line_color="#e74c3c",
-        annotation_text="mean",
-        annotation_position="top right",
-    )
-    fig.add_vline(
-        x=median_val,
-        line_dash="dot",
-        line_color="#27ae60",
-        annotation_text="median",
-        annotation_position="top left",
-    )
+
     fig.update_layout(
         margin=dict(l=40, r=20, t=60, b=40),
         template="plotly_white",
-        bargap=0.05,
+        barmode="overlay",
         xaxis_title="Latency (ms)",
         yaxis_title="Count",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        legend=dict(
+            orientation="v",
+            yanchor="top",
+            y=1,
+            xanchor="left",
+            x=1.02,
+            title="Hour (UTC)"
+        ),
     )
     return fig
 
 
 def _stat_cards(df: pd.DataFrame) -> html.Div:
-    """Render small cards with summary statistics."""
+    """Render small cards with summary statistics (overall across all hours)."""
     weights = df["bin_count"].to_numpy()
     values = df["latency_ms"].to_numpy()
     sample_count = int(weights.sum())
+    num_hours = len(df["hour"].unique())
 
     if sample_count == 0:
         mean_val = median_val = p95_val = 0.0
@@ -209,6 +218,7 @@ def _stat_cards(df: pd.DataFrame) -> html.Div:
 
     cards = [
         html.Div([html.Small("Samples"), html.H4(f"{sample_count:,}")], style=card_style),
+        html.Div([html.Small("Hours"), html.H4(f"{num_hours}")], style=card_style),
         html.Div([html.Small("Mean"), html.H4(fmt(mean_val))], style=card_style),
         html.Div([html.Small("Median"), html.H4(fmt(median_val))], style=card_style),
         html.Div([html.Small("P95"), html.H4(fmt(p95_val))], style=card_style),
