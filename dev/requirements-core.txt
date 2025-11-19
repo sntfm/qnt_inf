@@ -1,0 +1,9 @@
+pandas>=2.0.0
+numpy>=1.26.0
+polars>=1.6.0
+polars-u64-idx>=1.0.0
+tqdm>=4.65.0
+pyarrow>=14.0.1
+zstandard>=0.21.0
+questdb>=0.1.0
+python-dateutil>=2.8.0

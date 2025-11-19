@@ -50,16 +50,7 @@ data/*.json
 data/md/
 data/internal_engine/
 data/
-dev/pics/*
-dev/*.pkl
-dev/*.json
-dev/*.csv
-dev/*.txt
-dev/*.log
-dev/*.log.*
-dev/*.log.*.*
-dev/*.log.*.*.*
-dev/*.log.*.*.*.*
+
 
 # Logs
 *.log

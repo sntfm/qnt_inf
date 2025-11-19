@@ -1,8 +1,0 @@
-streamlit
-pandas
-requests
-dash
-plotly
-flask
-questdb
-psycopg2-binary
