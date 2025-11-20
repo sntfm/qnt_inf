@@ -183,6 +183,7 @@ def initialize_decay_widget(pathname):
      Output('decay-side-filter', 'options'),
      Output('decay-orderkind-filter', 'options'),
      Output('decay-ordertype-filter', 'options'),
+     Output('decay-tif-filter', 'options'),
      Output('decay-status', 'children')],
     [Input('decay-load-button', 'n_clicks'),
      Input('decay-refresh-button', 'n_clicks')],
@@ -197,7 +198,7 @@ def load_decay_data(load_clicks, refresh_clicks, date_str):
     ctx = callback_context
 
     if not ctx.triggered:
-        return [], [], [], [], ""
+        return [], [], [], [], [], ""
 
     button_id = ctx.triggered[0]['prop_id'].split('.')[0]
 
@@ -211,16 +212,17 @@ def load_decay_data(load_clicks, refresh_clicks, date_str):
             sides = [{'label': side, 'value': side} for side in sorted(deals_df['side'].unique())]
             order_kinds = [{'label': ok, 'value': ok} for ok in sorted(deals_df['orderKind'].dropna().unique())]
             order_types = [{'label': ot, 'value': ot} for ot in sorted(deals_df['orderType'].dropna().unique())]
+            tifs = [{'label': tif, 'value': tif} for tif in sorted(deals_df['tif'].dropna().unique())]
 
             status = f"Filters refreshed - {len(deals_df)} deals loaded"
-            return instruments, sides, order_kinds, order_types, status
+            return instruments, sides, order_kinds, order_types, tifs, status
         else:
-            return [], [], [], [], "No data loaded yet. Click 'Load Data' first."
+            return [], [], [], [], [], "No data loaded yet. Click 'Load Data' first."
 
     # If load button clicked
     if button_id == 'decay-load-button':
         if not load_clicks or load_clicks == 0:
-            return [], [], [], [], ""
+            return [], [], [], [], [], ""
 
         try:
             print(f"[DEBUG] Loading data for date: {date_str}")
@@ -229,7 +231,7 @@ def load_decay_data(load_clicks, refresh_clicks, date_str):
             deals_df, slices_dict = decay._build_dataset(date_str)
 
             if deals_df.empty:
-                return [], [], [], [], f"No deals found for {date_str}"
+                return [], [], [], [], [], f"No deals found for {date_str}"
 
             print(f"[DEBUG] deals_df columns: {deals_df.columns.tolist()}")
             print(f"[DEBUG] deals_df shape: {deals_df.shape}")
@@ -259,19 +261,20 @@ def load_decay_data(load_clicks, refresh_clicks, date_str):
             sides = [{'label': side, 'value': side} for side in sorted(deals_df['side'].unique())]
             order_kinds = [{'label': ok, 'value': ok} for ok in sorted(deals_df['orderKind'].dropna().unique())]
             order_types = [{'label': ot, 'value': ot} for ot in sorted(deals_df['orderType'].dropna().unique())]
+            tifs = [{'label': tif, 'value': tif} for tif in sorted(deals_df['tif'].dropna().unique())]
 
             status = f"Loaded {len(deals_df)} deals with {len(slices_dict)} neighbor slices"
             print(f"[DEBUG] Data stored in server-side cache. Status: {status}")
 
-            return instruments, sides, order_kinds, order_types, status
+            return instruments, sides, order_kinds, order_types, tifs, status
 
         except Exception as e:
             import traceback
             traceback.print_exc()
-            return [], [], [], [], f"Error: {str(e)}"
+            return [], [], [], [], [], f"Error: {str(e)}"
 
     # Default return if no button was clicked
-    return [], [], [], [], ""
+    return [], [], [], [], [], ""
 
 
 @app.callback(
@@ -279,11 +282,13 @@ def load_decay_data(load_clicks, refresh_clicks, date_str):
     [Input('decay-instrument-filter', 'value'),
      Input('decay-side-filter', 'value'),
      Input('decay-orderkind-filter', 'value'),
-     Input('decay-ordertype-filter', 'value')]
+     Input('decay-ordertype-filter', 'value'),
+     Input('decay-tif-filter', 'value')]
 )
-def update_decay_graph(instruments, sides, order_kinds, order_types):
+def update_decay_graph(instruments, sides, order_kinds, order_types, tifs):
     """Update graph based on filtered deals."""
     import pandas as pd
+    import plotly.express as px
 
     # Get data from server-side cache
     deals_data = DECAY_DATA_CACHE['deals']
@@ -296,6 +301,7 @@ def update_decay_graph(instruments, sides, order_kinds, order_types):
     print(f"  sides: {sides}")
     print(f"  order_kinds: {order_kinds}")
     print(f"  order_types: {order_types}")
+    print(f"  tifs: {tifs}")
 
     if deals_data is None or slices_data is None:
         # Return empty figure
@@ -336,12 +342,23 @@ def update_decay_graph(instruments, sides, order_kinds, order_types):
         mask &= deals_df['orderKind'].isin(order_kinds)
     if order_types:
         mask &= deals_df['orderType'].isin(order_types)
+    if tifs:
+        mask &= deals_df['tif'].isin(tifs)
 
     filtered_deals = deals_df[mask]
     print(f"[DEBUG] filtered_deals shape: {filtered_deals.shape}")
 
     # Create figure
     fig = go.Figure()
+
+    # Create color map for instruments using plotly default colors
+    unique_instruments = sorted(filtered_deals['instrument'].unique()) if not filtered_deals.empty else []
+    import plotly.express as px
+    colors = px.colors.qualitative.Plotly
+    color_map = {inst: colors[i % len(colors)] for i, inst in enumerate(unique_instruments)}
+
+    # Track which instruments have been added to legend
+    legend_added = set()
 
     # Plot each filtered deal's neighbor data
     traces_added = 0
@@ -358,19 +375,35 @@ def update_decay_graph(instruments, sides, order_kinds, order_types):
                 mid_px = [(a + b) / 2 for a, b in zip(ask_px, bid_px)]
 
                 deal = filtered_deals.loc[idx]
+                instrument = deal['instrument']
+
+                # Only show instrument name in legend (once per instrument)
+                show_legend = instrument not in legend_added
+                if show_legend:
+                    legend_added.add(instrument)
+
                 fig.add_trace(go.Scatter(
                     x=t_from_deal,
                     y=mid_px,
                     mode='lines',
-                    name=f"{deal['instrument']} {deal['side']}",
+                    name=instrument,
+                    legendgroup=instrument,
+                    showlegend=show_legend,
                     opacity=0.6,
-                    line=dict(width=1.5)
+                    line=dict(width=1.5, color=color_map.get(instrument, '#636EFA'))
                 ))
                 traces_added += 1
             else:
                 print(f"[DEBUG] Skipping idx {idx}: ask_px={len(ask_px)}, bid_px={len(bid_px)}, t_from_deal={len(t_from_deal)}")
 
     print(f"[DEBUG] Added {traces_added} traces to graph")
+
+    # Add reference lines at x=0 and y=0
+    if traces_added > 0:
+        # Get y-axis range for vertical line at x=0
+        fig.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5, annotation_text="t=0")
+        # Add horizontal line at y=0
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
 
     if traces_added == 0:
         # Add annotation if no traces

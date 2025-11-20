@@ -464,6 +464,19 @@ def get_widget_layout(n_intervals):
             ),
         ]),
 
+        # TIF filter
+        html.Div([
+            html.Label("Time In Force:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50'}),
+            dcc.Dropdown(
+                id='decay-tif-filter',
+                options=[],
+                value=[],
+                multi=True,
+                placeholder='All TIF',
+                style={'marginBottom': '16px'}
+            ),
+        ]),
+
         html.Hr(style={'border': 'none', 'borderTop': '1px solid #e0e0e0', 'margin': '20px 0'}),
 
         # Status message
