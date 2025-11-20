@@ -29,7 +29,7 @@ QUESTDB_DB = os.getenv("QUESTDB_DB", "qdb")
 LATENCY_SAMPLE_TABLE = os.getenv("LATENCY_WIDGET_SAMPLE_TABLE", "feed_kraken_tob_5")
 BIN_SIZE_MS = float(os.getenv("LATENCY_WIDGET_BIN_MS", "2"))
 MAX_LATENCY_MS = float(os.getenv("LATENCY_WIDGET_MAX_MS", "200"))
-
+VERBOSE = False
 
 def _connect():
     """Create a new psycopg2 connection to QuestDB's Postgres endpoint."""
@@ -47,7 +47,7 @@ def _run_query(sql: str, params: Sequence = ()) -> pd.DataFrame:
     """Execute a SQL query against QuestDB and return a pandas DataFrame."""
     with _connect() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(sql, params)
-        print("[DEBUG SQL]", cur.query.decode()) 
+        if VERBOSE: print("[DEBUG SQL]", cur.query.decode()) 
         rows = cur.fetchall()
     return pd.DataFrame(rows)
 
@@ -67,8 +67,8 @@ def _normalized_date_bounds(date_str: Optional[str]):
     start_us = int(start_dt.timestamp() * 1_000_000)
     end_us   = int(end_dt.timestamp() * 1_000_000)
 
-    print(f"[DEBUG] _normalized_date_bounds: date_str={date_str}, target_date={target_date}, start_dt={start_dt}, end_dt={end_dt}")
-    print(f"[DEBUG] start_us={start_us}, end_us={end_us}")
+    if VERBOSE: print(f"[DEBUG] _normalized_date_bounds: date_str={date_str}, target_date={target_date}, start_dt={start_dt}, end_dt={end_dt}")
+    if VERBOSE: print(f"[DEBUG] start_us={start_us}, end_us={end_us}")
 
     return start_us, end_us, target_date.isoformat()
 
@@ -83,9 +83,9 @@ def _fetch_latency_sample(
     Returns a DataFrame with one row per latency bin and hour:
         hour, latency_bin_start_ms, bin_count, latency_ms (bin center), date_str
     """
-    print(f"[DEBUG] _fetch_latency_sample called with table_name={table_name}, date_str={date_str}")
+    if VERBOSE: print(f"[DEBUG] _fetch_latency_sample called with table_name={table_name}, date_str={date_str}")
     start_us, end_us, normalized = _normalized_date_bounds(date_str)
-    print(f"[DEBUG] Time bounds: start_us={start_us}, end_us={end_us}, normalized={normalized}")
+    if VERBOSE: print(f"[DEBUG] Time bounds: start_us={start_us}, end_us={end_us}, normalized={normalized}")
     params = [start_us, end_us, BIN_SIZE_MS, BIN_SIZE_MS, MAX_LATENCY_MS]
 
 
@@ -110,7 +110,7 @@ def _fetch_latency_sample(
     """
 
     df = _run_query(sql, params)
-    print(df)
+
     if df.empty:
         return df
 
