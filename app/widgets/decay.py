@@ -496,87 +496,97 @@ def get_widget_layout(n_intervals):
 
         html.Hr(style={'border': 'none', 'borderTop': '1px solid #e0e0e0', 'margin': '20px 0'}),
 
-        # Instrument filter
-        html.Div([
-            html.Label("Instrument:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50'}),
-            dcc.Dropdown(
-                id='decay-instrument-filter',
-                options=[],
-                value=[],
-                multi=True,
-                placeholder='All instruments',
-                style={'marginBottom': '16px'}
-            ),
-        ]),
+        # Collapsible Filters section
+        html.Details([
+            html.Summary("Filters", style={
+                'fontWeight': '600',
+                'color': '#2c3e50',
+                'cursor': 'pointer',
+                'padding': '8px 0',
+                'marginBottom': '12px',
+                'userSelect': 'none'
+            }),
 
-        # Side filter
-        html.Div([
-            html.Label("Side:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50'}),
-            dcc.Dropdown(
-                id='decay-side-filter',
-                options=[],
-                value=[],
-                multi=True,
-                placeholder='All sides',
-                style={'marginBottom': '16px'}
-            ),
-        ]),
+            # Instrument filter
+            html.Div([
+                html.Label("Instrument:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50', 'fontSize': '13px'}),
+                dcc.Dropdown(
+                    id='decay-instrument-filter',
+                    options=[],
+                    value=[],
+                    multi=True,
+                    placeholder='All instruments',
+                    style={'marginBottom': '16px'}
+                ),
+            ]),
 
-        # Order Kind filter
-        html.Div([
-            html.Label("Order Kind:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50'}),
-            dcc.Dropdown(
-                id='decay-orderkind-filter',
-                options=[],
-                value=[],
-                multi=True,
-                placeholder='All kinds',
-                style={'marginBottom': '16px'}
-            ),
-        ]),
+            # Side filter
+            html.Div([
+                html.Label("Side:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50', 'fontSize': '13px'}),
+                dcc.Dropdown(
+                    id='decay-side-filter',
+                    options=[],
+                    value=[],
+                    multi=True,
+                    placeholder='All sides',
+                    style={'marginBottom': '16px'}
+                ),
+            ]),
 
-        # Order Type filter
-        html.Div([
-            html.Label("Order Type:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50'}),
-            dcc.Dropdown(
-                id='decay-ordertype-filter',
-                options=[],
-                value=[],
-                multi=True,
-                placeholder='All types',
-                style={'marginBottom': '16px'}
-            ),
-        ]),
+            # Order Kind filter
+            html.Div([
+                html.Label("Order Kind:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50', 'fontSize': '13px'}),
+                dcc.Dropdown(
+                    id='decay-orderkind-filter',
+                    options=[],
+                    value=[],
+                    multi=True,
+                    placeholder='All kinds',
+                    style={'marginBottom': '16px'}
+                ),
+            ]),
 
-        # TIF filter
-        html.Div([
-            html.Label("Time In Force:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50'}),
-            dcc.Dropdown(
-                id='decay-tif-filter',
-                options=[],
-                value=[],
-                multi=True,
-                placeholder='All TIF',
-                style={'marginBottom': '16px'}
-            ),
-        ]),
+            # Order Type filter
+            html.Div([
+                html.Label("Order Type:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50', 'fontSize': '13px'}),
+                dcc.Dropdown(
+                    id='decay-ordertype-filter',
+                    options=[],
+                    value=[],
+                    multi=True,
+                    placeholder='All types',
+                    style={'marginBottom': '16px'}
+                ),
+            ]),
 
-        html.Hr(style={'border': 'none', 'borderTop': '1px solid #e0e0e0', 'margin': '20px 0'}),
+            # TIF filter
+            html.Div([
+                html.Label("Time In Force:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50', 'fontSize': '13px'}),
+                dcc.Dropdown(
+                    id='decay-tif-filter',
+                    options=[],
+                    value=[],
+                    multi=True,
+                    placeholder='All TIF',
+                    style={'marginBottom': '16px'}
+                ),
+            ]),
 
-        # Aggregate dropdown
-        html.Div([
-            html.Label("Aggregate:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50'}),
-            dcc.Dropdown(
-                id='decay-aggregate-dropdown',
-                options=[
-                    {'label': 'None (show all lines)', 'value': 'none'},
-                    {'label': 'VWA (Volume Weighted Avg)', 'value': 'vwa'},
-                ],
-                value='none',
-                clearable=False,
-                style={'marginBottom': '16px'}
-            ),
-        ]),
+            # Aggregate dropdown
+            html.Div([
+                html.Label("Aggregate:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50', 'fontSize': '13px'}),
+                dcc.Dropdown(
+                    id='decay-aggregate-dropdown',
+                    options=[
+                        {'label': 'None (show all lines)', 'value': 'none'},
+                        {'label': 'VWA (Volume Weighted Avg)', 'value': 'vwa'},
+                    ],
+                    value='none',
+                    clearable=False,
+                    style={'marginBottom': '16px'}
+                ),
+            ]),
+        ], open=True, style={'marginBottom': '16px'}),
 
         html.Hr(style={'border': 'none', 'borderTop': '1px solid #e0e0e0', 'margin': '20px 0'}),
 
@@ -605,8 +615,22 @@ def get_widget_layout(n_intervals):
                 ),
                 style={'flex': '1', 'minWidth': '0'}
             ),
-            # Right side - Filters
-            right_panel,
+            # Right side - Collapsible Controls Panel
+            html.Details([
+                html.Summary("Controls", style={
+                    'fontWeight': '600',
+                    'color': '#2c3e50',
+                    'cursor': 'pointer',
+                    'padding': '8px 12px',
+                    'backgroundColor': '#f8f9fa',
+                    'borderRadius': '6px',
+                    'userSelect': 'none',
+                    'writingMode': 'vertical-rl',
+                    'textOrientation': 'mixed',
+                    'height': 'fit-content'
+                }),
+                right_panel,
+            ], open=True, style={'display': 'flex', 'alignItems': 'flex-start'}),
         ], style={'display': 'flex', 'alignItems': 'flex-start'}),
     ], style={
         'backgroundColor': '#ffffff',

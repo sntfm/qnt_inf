@@ -330,7 +330,7 @@ def get_widget_content(
     if date_str:
         default_date = date_str
 
-    # Right panel with date picker, apply button, and stats
+    # Right panel with date picker, apply button, and collapsible stats
     right_panel = html.Div(
         [
             html.Div(
@@ -365,7 +365,18 @@ def get_widget_content(
                 },
             ),
             html.Hr(style={"border": "none", "borderTop": "1px solid #e0e0e0", "margin": "20px 0"}),
-            stats_component,
+            # Collapsible Stats section
+            html.Details([
+                html.Summary("Statistics", style={
+                    "fontWeight": "600",
+                    "color": "#2c3e50",
+                    "cursor": "pointer",
+                    "padding": "8px 0",
+                    "marginBottom": "12px",
+                    "userSelect": "none"
+                }),
+                stats_component,
+            ], open=True, style={"marginBottom": "16px"}),
         ],
         style={"width": "280px", "marginLeft": "20px"},
     )
@@ -378,7 +389,22 @@ def get_widget_content(
                         dcc.Graph(id="latency-histogram", figure=fig, config={"displaylogo": False}),
                         style={"flex": "1", "minWidth": "0"},
                     ),
-                    right_panel,
+                    # Collapsible Controls Panel
+                    html.Details([
+                        html.Summary("Controls", style={
+                            "fontWeight": "600",
+                            "color": "#2c3e50",
+                            "cursor": "pointer",
+                            "padding": "8px 12px",
+                            "backgroundColor": "#f8f9fa",
+                            "borderRadius": "6px",
+                            "userSelect": "none",
+                            "writingMode": "vertical-rl",
+                            "textOrientation": "mixed",
+                            "height": "fit-content"
+                        }),
+                        right_panel,
+                    ], open=True, style={"display": "flex", "alignItems": "flex-start"}),
                 ],
                 style={"display": "flex", "alignItems": "flex-start"},
             ),
