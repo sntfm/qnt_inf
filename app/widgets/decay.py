@@ -458,6 +458,16 @@ def get_widget_layout(n_intervals):
             ),
         ]),
 
+        # Show legend checkbox
+        html.Div([
+            dcc.Checklist(
+                id='decay-show-legend',
+                options=[{'label': ' Show Legend', 'value': 'show'}],
+                value=['show'],
+                style={'fontSize': '13px', 'color': '#2c3e50'}
+            ),
+        ], style={'marginBottom': '12px'}),
+
         # Load button
         html.Button(
             'Load Data',

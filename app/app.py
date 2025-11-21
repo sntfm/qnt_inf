@@ -288,9 +288,10 @@ def load_decay_data(load_clicks, refresh_clicks, date_str, view):
      Input('decay-orderkind-filter', 'value'),
      Input('decay-ordertype-filter', 'value'),
      Input('decay-tif-filter', 'value'),
-     Input('decay-aggregate-dropdown', 'value')]
+     Input('decay-aggregate-dropdown', 'value'),
+     Input('decay-show-legend', 'value')]
 )
-def update_decay_graph(status, instruments, sides, order_kinds, order_types, tifs, aggregate):
+def update_decay_graph(status, instruments, sides, order_kinds, order_types, tifs, aggregate, legend_visible):
     """Update graph based on filtered deals."""
     import pandas as pd
     import numpy as np
@@ -510,7 +511,7 @@ def update_decay_graph(status, instruments, sides, order_kinds, order_types, tif
         xaxis_title="Time from Deal (sec)",
         yaxis_title=yaxis_label,
         hovermode='closest',
-        showlegend=True,
+        showlegend=bool(legend_visible),  # legend_visible is ['show'] or []
         legend=dict(
             orientation="v",
             yanchor="top",
