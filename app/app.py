@@ -287,11 +287,13 @@ def load_decay_data(load_clicks, refresh_clicks, date_str, view):
      Input('decay-side-filter', 'value'),
      Input('decay-orderkind-filter', 'value'),
      Input('decay-ordertype-filter', 'value'),
-     Input('decay-tif-filter', 'value')]
+     Input('decay-tif-filter', 'value'),
+     Input('decay-aggregate-dropdown', 'value')]
 )
-def update_decay_graph(status, instruments, sides, order_kinds, order_types, tifs):
+def update_decay_graph(status, instruments, sides, order_kinds, order_types, tifs, aggregate):
     """Update graph based on filtered deals."""
     import pandas as pd
+    import numpy as np
     import plotly.express as px
 
     # Get data from server-side cache
@@ -310,6 +312,7 @@ def update_decay_graph(status, instruments, sides, order_kinds, order_types, tif
     print(f"  order_kinds: {order_kinds}")
     print(f"  order_types: {order_types}")
     print(f"  tifs: {tifs}")
+    print(f"  aggregate: {aggregate}")
 
     if deals_data is None or slices_data is None:
         # Return empty figure
@@ -373,36 +376,108 @@ def update_decay_graph(status, instruments, sides, order_kinds, order_types, tif
     y_column = 'pnl_usd' if view == 'usd_pnl' else 'ret'
 
     traces_added = 0
-    for idx in filtered_deals.index:
-        if str(idx) in slices_data:
-            slice_dict = slices_data[str(idx)]
-            t_from_deal = slice_dict.get('t_from_deal', [])
 
-            y_data = slice_dict.get(y_column, [])
+    if aggregate == 'vwa':
+        # Volume Weighted Average aggregation per instrument
+        # Group deals by instrument and compute VWA of y values at each t_from_deal
+        for instrument in unique_instruments:
+            inst_deals = filtered_deals[filtered_deals['instrument'] == instrument]
 
-            if y_data and t_from_deal:
-                deal = filtered_deals.loc[idx]
-                instrument = deal['instrument']
+            # Collect all slices for this instrument with their USD volumes
+            inst_slices = []
+            inst_volumes = []
 
-                # Only show instrument name in legend (once per instrument)
-                show_legend = instrument not in legend_added
-                if show_legend:
-                    legend_added.add(instrument)
+            for idx in inst_deals.index:
+                if str(idx) not in slices_data:
+                    continue
 
-                fig.add_trace(go.Scatter(
-                    x=t_from_deal,
-                    y=y_data,
-                    mode='lines',
-                    name=instrument,
-                    legendgroup=instrument,
-                    showlegend=show_legend,
-                    opacity=0.6,
-                    line=dict(width=1.5, color=color_map.get(instrument, '#636EFA')),
-                    hovertemplate=f"<b>{instrument}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
-                ))
-                traces_added += 1
-            else:
-                print(f"[DEBUG] Skipping idx {idx}: y_data={len(y_data) if y_data else 0}, t_from_deal={len(t_from_deal)}")
+                slice_dict = slices_data[str(idx)]
+                t_from_deal = slice_dict.get('t_from_deal', [])
+                y_data = slice_dict.get(y_column, [])
+
+                if not y_data or not t_from_deal:
+                    continue
+
+                deal = inst_deals.loc[idx]
+                # Calculate USD volume for weighting
+                usd_volume = deal['px'] * deal['amt']
+                # Get USD conversion rate at t=0 if available
+                usd_px_0 = slice_dict.get('usd_ask_px_0', [1.0])
+                if usd_px_0:
+                    usd_volume *= usd_px_0[len(usd_px_0)//2] if len(usd_px_0) > 0 else 1.0
+
+                inst_slices.append(pd.DataFrame({
+                    't_from_deal': t_from_deal,
+                    'y': y_data
+                }))
+                inst_volumes.append(usd_volume)
+
+            if not inst_slices:
+                continue
+
+            # Combine all slices and compute VWA at each t_from_deal
+            # First, align all slices to common t_from_deal values
+            all_t = sorted(set().union(*[set(s['t_from_deal']) for s in inst_slices]))
+
+            vwa_y = []
+            for t in all_t:
+                weighted_sum = 0.0
+                total_weight = 0.0
+                for slice_df, volume in zip(inst_slices, inst_volumes):
+                    matching = slice_df[slice_df['t_from_deal'] == t]
+                    if not matching.empty:
+                        weighted_sum += matching['y'].iloc[0] * volume
+                        total_weight += volume
+                if total_weight > 0:
+                    vwa_y.append(weighted_sum / total_weight)
+                else:
+                    vwa_y.append(np.nan)
+
+            # Plot the VWA line for this instrument
+            fig.add_trace(go.Scatter(
+                x=all_t,
+                y=vwa_y,
+                mode='lines',
+                name=f"{instrument} (VWA)",
+                legendgroup=instrument,
+                showlegend=True,
+                opacity=0.9,
+                line=dict(width=2.5, color=color_map.get(instrument, '#636EFA')),
+                hovertemplate=f"<b>{instrument} (VWA)</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
+            ))
+            traces_added += 1
+    else:
+        # No aggregation - show all individual lines
+        for idx in filtered_deals.index:
+            if str(idx) in slices_data:
+                slice_dict = slices_data[str(idx)]
+                t_from_deal = slice_dict.get('t_from_deal', [])
+
+                y_data = slice_dict.get(y_column, [])
+
+                if y_data and t_from_deal:
+                    deal = filtered_deals.loc[idx]
+                    instrument = deal['instrument']
+
+                    # Only show instrument name in legend (once per instrument)
+                    show_legend = instrument not in legend_added
+                    if show_legend:
+                        legend_added.add(instrument)
+
+                    fig.add_trace(go.Scatter(
+                        x=t_from_deal,
+                        y=y_data,
+                        mode='lines',
+                        name=instrument,
+                        legendgroup=instrument,
+                        showlegend=show_legend,
+                        opacity=0.6,
+                        line=dict(width=1.5, color=color_map.get(instrument, '#636EFA')),
+                        hovertemplate=f"<b>{instrument}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
+                    ))
+                    traces_added += 1
+                else:
+                    print(f"[DEBUG] Skipping idx {idx}: y_data={len(y_data) if y_data else 0}, t_from_deal={len(t_from_deal)}")
 
     print(f"[DEBUG] Added {traces_added} traces to graph")
 

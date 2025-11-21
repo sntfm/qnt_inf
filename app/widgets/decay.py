@@ -563,6 +563,23 @@ def get_widget_layout(n_intervals):
 
         html.Hr(style={'border': 'none', 'borderTop': '1px solid #e0e0e0', 'margin': '20px 0'}),
 
+        # Aggregate dropdown
+        html.Div([
+            html.Label("Aggregate:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50'}),
+            dcc.Dropdown(
+                id='decay-aggregate-dropdown',
+                options=[
+                    {'label': 'None (show all lines)', 'value': 'none'},
+                    {'label': 'VWA (Volume Weighted Avg)', 'value': 'vwa'},
+                ],
+                value='none',
+                clearable=False,
+                style={'marginBottom': '16px'}
+            ),
+        ]),
+
+        html.Hr(style={'border': 'none', 'borderTop': '1px solid #e0e0e0', 'margin': '20px 0'}),
+
         # Status message
         html.Div(
             id='decay-status',
