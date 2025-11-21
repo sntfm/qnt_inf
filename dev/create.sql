@@ -15,3 +15,41 @@ CREATE TABLE mart_{}_latency_stats (
     p99_ms DOUBLE,
     sample_count LONG
 ) TIMESTAMP(ts) PARTITION BY YEAR;
+
+CREATE TABLE IF NOT EXISTS convmap_usd (
+    instrument SYMBOL,
+    usd_instrument SYMBOL,
+    is_inverted BOOLEAN
+);
+
+-- Deals slices table: for each deal, stores price snapshots within lookup_window
+-- t_from_deal is seconds offset from deal time (negative = before, 0 = at deal, positive = after)
+CREATE TABLE mart_{}_decay_slices (
+    time TIMESTAMP,             -- time of the deal
+    instrument SYMBOL,               -- deal instrument
+    t_from_deal INT,                 -- seconds offset from deal time
+    ask_px_0 DOUBLE,                 -- ask price at this time
+    bid_px_0 DOUBLE,                 -- bid price at this time
+    usd_ask_px_0 DOUBLE,             -- USD conversion ask price (if applicable)
+    usd_bid_px_0 DOUBLE               -- USD conversion bid price (if applicable)
+) TIMESTAMP(deal_time) PARTITION BY MONTH;
+
+CREATE TABLE mart_{}_decay_deals (
+    time TIMESTAMP,
+    instrument SYMBOL,
+    side SYMBOL,
+    amt DOUBLE,
+    px DOUBLE,
+    orderKind SYMBOL,
+    orderType SYMBOL,
+    tif SYMBOL,
+    orderStatus SYMBOL,
+    amt_usd DOUBLE                   -- amt * px * usd_conversion_rate
+) TIMESTAMP(time) PARTITION BY MONTH;
+
+CREATE TABLE feed_kraken_1s (
+    ts TIMESTAMP,
+    instrument SYMBOL,
+    ask_px_0 DOUBLE,
+    bid_px_0 DOUBLE
+) TIMESTAMP(ts) PARTITION BY MONTH;

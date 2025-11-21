@@ -1,6 +1,6 @@
 """
-Decay/PnL widget for Dash app.
-Placeholder - to be implemented.
+Decay/Markouts widget for Dash app.
+
 """
 
 from dash import html, dcc
@@ -313,7 +313,7 @@ def _build_dataset(date: str, view: str, frame_mins: int = 15, table_name: str =
 
     print(f"Found {len(deals_df)} deals for {date}")
 
-    # Dictionary to store neighbor slices keyed by deal index
+    # Dictionary to store neighbor  s keyed by deal index
     slices_dict = {}
 
     # Fetch neighbors in parallel using ThreadPoolExecutor
