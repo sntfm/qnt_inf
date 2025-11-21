@@ -106,7 +106,7 @@ def initialize_latency_controls(pathname):
     """Initialize latency filter controls (only once on page load)."""
     if pathname == '/app':
         try:
-            return latency.create_filter_controls(table_name="feed_kraken_tob_5")
+            return latency.create_filter_controls()
         except Exception as e:
             return html.Div([
                 html.P(f"Error loading controls: {str(e)}",
@@ -123,8 +123,8 @@ def initialize_latency_widget(pathname):
     """Initialize latency widget content on page load."""
     if pathname == '/app':
         try:
-            # Load widget content with default settings (today's date)
-            return latency.get_widget_content(date_str=None, table_name="feed_kraken_tob_5")
+            # Load widget content with default settings (latest available date)
+            return latency.get_widget_content()
         except Exception as e:
             import traceback
             return html.Div([
@@ -135,22 +135,20 @@ def initialize_latency_widget(pathname):
             ])
     return html.Div()
 
-# Latency widget - filter updates
+# Latency widget - update on date selection
 @app.callback(
     Output('latency-widget-container', 'children', allow_duplicate=True),
-    Input('latency-apply-button', 'n_clicks'),
-    State('latency-date-input', 'date'),
+    Input('latency-date-input', 'date'),
     prevent_initial_call=True
 )
-def update_latency_filters(n_clicks, date):
-    """Update latency widget when filters are applied."""
+def update_latency_on_date_change(date_str):
+    """Update latency widget when date is selected."""
     try:
-        print(f"[DEBUG] update_latency_filters called with n_clicks={n_clicks}, date={date}")
-        # Use get_widget_content to update only the data, not the controls
-        return latency.get_widget_content(date_str=date, table_name="feed_kraken_tob_5")
+        print(f"[DEBUG] update_latency_on_date_change called with date_str={date_str}")
+        return latency.get_widget_content(date_str=date_str)
     except Exception as e:
         import traceback
-        print(f"Error in update_latency_filters: {e}")
+        print(f"Error in update_latency_on_date_change: {e}")
         return html.Div([
             html.P(f"Latency widget error: {str(e)}",
                   style={'color': '#e74c3c', 'fontStyle': 'italic'}),
