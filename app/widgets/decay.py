@@ -18,73 +18,75 @@ from psycopg2.extras import RealDictCursor
 # ---------------------------------------------------------------------------
 # Mappings
 # ---------------------------------------------------------------------------
+# Maps instrument to (usd_conversion_instrument, is_inverted)
+# is_inverted=True means we need to use 1/rate (e.g., USD/CHF -> CHF/USD = 1/rate)
 USD_CONVERSION_MAP = {
-    "Kraken.Spot.ADA/BTC_SPOT": "Kraken.Spot.BTC/USD_SPOT",
-    "Kraken.Spot.ADA/ETH_SPOT": "Kraken.Spot.ETH/USD_SPOT",
-    "Kraken.Spot.ADA/EUR_SPOT": "Kraken.Spot.EUR/USD_SPOT",
-    "Kraken.Spot.ADA/GBP_SPOT": "Kraken.Spot.GBP/USD_SPOT",
-    "Kraken.Spot.ADA/USDC_SPOT": "Kraken.Spot.USDC/USD_SPOT",
-    "Kraken.Spot.ADA/USDT_SPOT": "Kraken.Spot.USDT/USD_SPOT",
+    "Kraken.Spot.ADA/BTC_SPOT": ("Kraken.Spot.BTC/USD_SPOT", False),
+    "Kraken.Spot.ADA/ETH_SPOT": ("Kraken.Spot.ETH/USD_SPOT", False),
+    "Kraken.Spot.ADA/EUR_SPOT": ("Kraken.Spot.EUR/USD_SPOT", False),
+    "Kraken.Spot.ADA/GBP_SPOT": ("Kraken.Spot.GBP/USD_SPOT", False),
+    "Kraken.Spot.ADA/USDC_SPOT": ("Kraken.Spot.USDC/USD_SPOT", False),
+    "Kraken.Spot.ADA/USDT_SPOT": ("Kraken.Spot.USDT/USD_SPOT", False),
 
-    "Kraken.Spot.BCH/BTC_SPOT": "Kraken.Spot.BTC/USD_SPOT",
-    "Kraken.Spot.BCH/ETH_SPOT": "Kraken.Spot.ETH/USD_SPOT",
-    "Kraken.Spot.BCH/EUR_SPOT": "Kraken.Spot.EUR/USD_SPOT",
-    "Kraken.Spot.BCH/GBP_SPOT": "Kraken.Spot.GBP/USD_SPOT",
-    "Kraken.Spot.BCH/USDC_SPOT": "Kraken.Spot.USDC/USD_SPOT",
-    "Kraken.Spot.BCH/USDT_SPOT": "Kraken.Spot.USDT/USD_SPOT",
+    "Kraken.Spot.BCH/BTC_SPOT": ("Kraken.Spot.BTC/USD_SPOT", False),
+    "Kraken.Spot.BCH/ETH_SPOT": ("Kraken.Spot.ETH/USD_SPOT", False),
+    "Kraken.Spot.BCH/EUR_SPOT": ("Kraken.Spot.EUR/USD_SPOT", False),
+    "Kraken.Spot.BCH/GBP_SPOT": ("Kraken.Spot.GBP/USD_SPOT", False),
+    "Kraken.Spot.BCH/USDC_SPOT": ("Kraken.Spot.USDC/USD_SPOT", False),
+    "Kraken.Spot.BCH/USDT_SPOT": ("Kraken.Spot.USDT/USD_SPOT", False),
 
-    "Kraken.Spot.BTC/CHF_SPOT": "Kraken.Spot.CHF/USD_SPOT",
-    "Kraken.Spot.BTC/EUR_SPOT": "Kraken.Spot.EUR/USD_SPOT",
-    "Kraken.Spot.BTC/GBP_SPOT": "Kraken.Spot.GBP/USD_SPOT",
-    "Kraken.Spot.BTC/USDC_SPOT": "Kraken.Spot.USDC/USD_SPOT",
-    "Kraken.Spot.BTC/USDT_SPOT": "Kraken.Spot.USDT/USD_SPOT",
+    "Kraken.Spot.BTC/CHF_SPOT": ("Kraken.Spot.USD/CHF_SPOT", True),  # Use 1/rate
+    "Kraken.Spot.BTC/EUR_SPOT": ("Kraken.Spot.EUR/USD_SPOT", False),
+    "Kraken.Spot.BTC/GBP_SPOT": ("Kraken.Spot.GBP/USD_SPOT", False),
+    "Kraken.Spot.BTC/USDC_SPOT": ("Kraken.Spot.USDC/USD_SPOT", False),
+    "Kraken.Spot.BTC/USDT_SPOT": ("Kraken.Spot.USDT/USD_SPOT", False),
 
-    "Kraken.Spot.DOGE/BTC_SPOT": "Kraken.Spot.BTC/USD_SPOT",
-    "Kraken.Spot.DOGE/EUR_SPOT": "Kraken.Spot.EUR/USD_SPOT",
-    "Kraken.Spot.DOGE/GBP_SPOT": "Kraken.Spot.GBP/USD_SPOT",
-    "Kraken.Spot.DOGE/USDC_SPOT": "Kraken.Spot.USDC/USD_SPOT",
-    "Kraken.Spot.DOGE/USDT_SPOT": "Kraken.Spot.USDT/USD_SPOT",
+    "Kraken.Spot.DOGE/BTC_SPOT": ("Kraken.Spot.BTC/USD_SPOT", False),
+    "Kraken.Spot.DOGE/EUR_SPOT": ("Kraken.Spot.EUR/USD_SPOT", False),
+    "Kraken.Spot.DOGE/GBP_SPOT": ("Kraken.Spot.GBP/USD_SPOT", False),
+    "Kraken.Spot.DOGE/USDC_SPOT": ("Kraken.Spot.USDC/USD_SPOT", False),
+    "Kraken.Spot.DOGE/USDT_SPOT": ("Kraken.Spot.USDT/USD_SPOT", False),
 
-    "Kraken.Spot.ETH/BTC_SPOT": "Kraken.Spot.BTC/USD_SPOT",
-    "Kraken.Spot.ETH/CHF_SPOT": "Kraken.Spot.CHF/USD_SPOT",
-    "Kraken.Spot.ETH/EUR_SPOT": "Kraken.Spot.EUR/USD_SPOT",
-    "Kraken.Spot.ETH/GBP_SPOT": "Kraken.Spot.GBP/USD_SPOT",
-    "Kraken.Spot.ETH/USDC_SPOT": "Kraken.Spot.USDC/USD_SPOT",
-    "Kraken.Spot.ETH/USDT_SPOT": "Kraken.Spot.USDT/USD_SPOT",
+    "Kraken.Spot.ETH/BTC_SPOT": ("Kraken.Spot.BTC/USD_SPOT", False),
+    "Kraken.Spot.ETH/CHF_SPOT": ("Kraken.Spot.USD/CHF_SPOT", True),  # Use 1/rate
+    "Kraken.Spot.ETH/EUR_SPOT": ("Kraken.Spot.EUR/USD_SPOT", False),
+    "Kraken.Spot.ETH/GBP_SPOT": ("Kraken.Spot.GBP/USD_SPOT", False),
+    "Kraken.Spot.ETH/USDC_SPOT": ("Kraken.Spot.USDC/USD_SPOT", False),
+    "Kraken.Spot.ETH/USDT_SPOT": ("Kraken.Spot.USDT/USD_SPOT", False),
 
-    "Kraken.Spot.EUR/CHF_SPOT": "Kraken.Spot.CHF/USD_SPOT",
-    "Kraken.Spot.EUR/GBP_SPOT": "Kraken.Spot.GBP/USD_SPOT",
+    "Kraken.Spot.EUR/CHF_SPOT": ("Kraken.Spot.USD/CHF_SPOT", True),  # Use 1/rate
+    "Kraken.Spot.EUR/GBP_SPOT": ("Kraken.Spot.GBP/USD_SPOT", False),
 
-    "Kraken.Spot.LTC/BTC_SPOT": "Kraken.Spot.BTC/USD_SPOT",
-    "Kraken.Spot.LTC/ETH_SPOT": "Kraken.Spot.ETH/USD_SPOT",
-    "Kraken.Spot.LTC/EUR_SPOT": "Kraken.Spot.EUR/USD_SPOT",
-    "Kraken.Spot.LTC/GBP_SPOT": "Kraken.Spot.GBP/USD_SPOT",
-    "Kraken.Spot.LTC/USDC_SPOT": "Kraken.Spot.USDC/USD_SPOT",
-    "Kraken.Spot.LTC/USDT_SPOT": "Kraken.Spot.USDT/USD_SPOT",
+    "Kraken.Spot.LTC/BTC_SPOT": ("Kraken.Spot.BTC/USD_SPOT", False),
+    "Kraken.Spot.LTC/ETH_SPOT": ("Kraken.Spot.ETH/USD_SPOT", False),
+    "Kraken.Spot.LTC/EUR_SPOT": ("Kraken.Spot.EUR/USD_SPOT", False),
+    "Kraken.Spot.LTC/GBP_SPOT": ("Kraken.Spot.GBP/USD_SPOT", False),
+    "Kraken.Spot.LTC/USDC_SPOT": ("Kraken.Spot.USDC/USD_SPOT", False),
+    "Kraken.Spot.LTC/USDT_SPOT": ("Kraken.Spot.USDT/USD_SPOT", False),
 
-    "Kraken.Spot.SOL/BTC_SPOT": "Kraken.Spot.BTC/USD_SPOT",
-    "Kraken.Spot.SOL/ETH_SPOT": "Kraken.Spot.ETH/USD_SPOT",
-    "Kraken.Spot.SOL/EUR_SPOT": "Kraken.Spot.EUR/USD_SPOT",
-    "Kraken.Spot.SOL/GBP_SPOT": "Kraken.Spot.GBP/USD_SPOT",
-    "Kraken.Spot.SOL/USDC_SPOT": "Kraken.Spot.USDC/USD_SPOT",
-    "Kraken.Spot.SOL/USDT_SPOT": "Kraken.Spot.USDT/USD_SPOT",
+    "Kraken.Spot.SOL/BTC_SPOT": ("Kraken.Spot.BTC/USD_SPOT", False),
+    "Kraken.Spot.SOL/ETH_SPOT": ("Kraken.Spot.ETH/USD_SPOT", False),
+    "Kraken.Spot.SOL/EUR_SPOT": ("Kraken.Spot.EUR/USD_SPOT", False),
+    "Kraken.Spot.SOL/GBP_SPOT": ("Kraken.Spot.GBP/USD_SPOT", False),
+    "Kraken.Spot.SOL/USDC_SPOT": ("Kraken.Spot.USDC/USD_SPOT", False),
+    "Kraken.Spot.SOL/USDT_SPOT": ("Kraken.Spot.USDT/USD_SPOT", False),
 
-    "Kraken.Spot.USD/CHF_SPOT": "Kraken.Spot.CHF/USD_SPOT",
-    "Kraken.Spot.USDC/CHF_SPOT": "Kraken.Spot.CHF/USD_SPOT",
-    "Kraken.Spot.USDC/EUR_SPOT": "Kraken.Spot.EUR/USD_SPOT",
-    "Kraken.Spot.USDC/GBP_SPOT": "Kraken.Spot.GBP/USD_SPOT",
-    "Kraken.Spot.USDC/USDT_SPOT": "Kraken.Spot.USDT/USD_SPOT",
+    "Kraken.Spot.USD/CHF_SPOT": ("Kraken.Spot.USD/CHF_SPOT", True),  # USD/CHF -> CHF/USD = 1/rate
+    "Kraken.Spot.USDC/CHF_SPOT": ("Kraken.Spot.USD/CHF_SPOT", True),  # Use 1/rate
+    "Kraken.Spot.USDC/EUR_SPOT": ("Kraken.Spot.EUR/USD_SPOT", False),
+    "Kraken.Spot.USDC/GBP_SPOT": ("Kraken.Spot.GBP/USD_SPOT", False),
+    "Kraken.Spot.USDC/USDT_SPOT": ("Kraken.Spot.USDT/USD_SPOT", False),
 
-    "Kraken.Spot.USDT/CHF_SPOT": "Kraken.Spot.CHF/USD_SPOT",
-    "Kraken.Spot.USDT/EUR_SPOT": "Kraken.Spot.EUR/USD_SPOT",
-    "Kraken.Spot.USDT/GBP_SPOT": "Kraken.Spot.GBP/USD_SPOT",
+    "Kraken.Spot.USDT/CHF_SPOT": ("Kraken.Spot.USD/CHF_SPOT", True),  # Use 1/rate
+    "Kraken.Spot.USDT/EUR_SPOT": ("Kraken.Spot.EUR/USD_SPOT", False),
+    "Kraken.Spot.USDT/GBP_SPOT": ("Kraken.Spot.GBP/USD_SPOT", False),
 
-    "Kraken.Spot.XRP/BTC_SPOT": "Kraken.Spot.BTC/USD_SPOT",
-    "Kraken.Spot.XRP/ETH_SPOT": "Kraken.Spot.ETH/USD_SPOT",
-    "Kraken.Spot.XRP/EUR_SPOT": "Kraken.Spot.EUR/USD_SPOT",
-    "Kraken.Spot.XRP/GBP_SPOT": "Kraken.Spot.GBP/USD_SPOT",
-    "Kraken.Spot.XRP/USDC_SPOT": "Kraken.Spot.USDC/USD_SPOT",
-    "Kraken.Spot.XRP/USDT_SPOT": "Kraken.Spot.USDT/USD_SPOT",
+    "Kraken.Spot.XRP/BTC_SPOT": ("Kraken.Spot.BTC/USD_SPOT", False),
+    "Kraken.Spot.XRP/ETH_SPOT": ("Kraken.Spot.ETH/USD_SPOT", False),
+    "Kraken.Spot.XRP/EUR_SPOT": ("Kraken.Spot.EUR/USD_SPOT", False),
+    "Kraken.Spot.XRP/GBP_SPOT": ("Kraken.Spot.GBP/USD_SPOT", False),
+    "Kraken.Spot.XRP/USDC_SPOT": ("Kraken.Spot.USDC/USD_SPOT", False),
+    "Kraken.Spot.XRP/USDT_SPOT": ("Kraken.Spot.USDT/USD_SPOT", False),
 }
 
 
@@ -150,7 +152,7 @@ def _fetch_deals(date: str) -> pd.DataFrame:
 
     return df
 
-def _fetch_neighbors(instrument: str, ts_start: datetime, frame_mins: int = 15, 
+def _fetch_neighbors(instrument: str, ts_start: datetime, frame_mins: int = 15,
                         table_name: str = "feed_kraken_tob_5", resample: Optional[str] = "1s") -> pd.DataFrame:
 
     # Calculate time window
@@ -162,50 +164,110 @@ def _fetch_neighbors(instrument: str, ts_start: datetime, frame_mins: int = 15,
     ts_before_str = ts_before.strftime(fmt)
     ts_after_str = ts_after.strftime(fmt)
 
+    # Check if we need USD conversion prices
+    usd_conversion = USD_CONVERSION_MAP.get(instrument)
+    usd_instrument = None
+    is_inverted = False
+    if usd_conversion:
+        usd_instrument, is_inverted = usd_conversion
+
+    # Build list of instruments to fetch
+    instruments_to_fetch = [instrument]
+    if usd_instrument:
+        instruments_to_fetch.append(usd_instrument)
+        print(f"[DEBUG] Fetching USD conversion: {instrument} -> {usd_instrument} (inverted={is_inverted})")
+
     # Build SQL query with optional resampling
+    placeholders = ', '.join(['%s'] * len(instruments_to_fetch))
     if resample is not None:
-        # QuestDB SAMPLE BY syntax for resampling
         sql = f"""
             SELECT ts_server, instrument,
                    last(ask_px_0) as ask_px_0,
                    last(bid_px_0) as bid_px_0
             FROM {table_name}
             WHERE ts_server BETWEEN %s AND %s
-              AND instrument = %s
+              AND instrument IN ({placeholders})
             SAMPLE BY {resample}
             ALIGN TO CALENDAR
         """
     else:
-        # No resampling - fetch raw data
         sql = f"""
             SELECT ts_server, instrument, ask_px_0, bid_px_0
             FROM {table_name}
             WHERE ts_server BETWEEN %s AND %s
-              AND instrument = %s
+              AND instrument IN ({placeholders})
             ORDER BY ts_server
         """
 
     # Execute query
-    df = _run_query(sql, (ts_before_str, ts_after_str, instrument))
+    params = (ts_before_str, ts_after_str, *instruments_to_fetch)
+    df = _run_query(sql, params)
 
-    # Convert ts_server to datetime and build t_from_deal column
-    if not df.empty and 'ts_server' in df.columns:
-        df['ts_server'] = pd.to_datetime(df['ts_server'], utc=True)
+    if df.empty:
+        return df
 
-        # Sort by timestamp to ensure correct ordering
-        df = df.sort_values('ts_server').reset_index(drop=True)
+    # Convert ts_server to datetime
+    df['ts_server'] = pd.to_datetime(df['ts_server'], utc=True)
 
-        # Find the index closest to ts_start (where t_from_deal = 0)
-        time_diffs = (df['ts_server'] - ts_start).abs()
-        center_idx = time_diffs.idxmin()
+    # Split into main instrument and USD conversion instrument
+    main_df = df[df['instrument'] == instrument].copy()
 
-        # Build t_from_deal: negative before ts_start, 0 at ts_start, positive after
-        df['t_from_deal'] = df.index - center_idx
+    if main_df.empty:
+        return pd.DataFrame()
 
-        # Drop ts_server column
-        df = df.drop(columns=['ts_server'])
+    # Sort by timestamp to ensure correct ordering
+    main_df = main_df.sort_values('ts_server').reset_index(drop=True)
 
-    return df
+    # Find the index closest to ts_start (where t_from_deal = 0)
+    time_diffs = (main_df['ts_server'] - ts_start).abs()
+    center_idx = time_diffs.idxmin()
+
+    # Build t_from_deal: negative before ts_start, 0 at ts_start, positive after
+    main_df['t_from_deal'] = main_df.index - center_idx
+
+    # Add USD prices
+    if usd_instrument and usd_instrument in df['instrument'].values:
+        print(f"[DEBUG] Found USD instrument {usd_instrument} in data (inverted={is_inverted})")
+        # Fetch USD conversion data and merge
+        usd_df = df[df['instrument'] == usd_instrument].copy()
+        usd_df = usd_df.sort_values('ts_server').reset_index(drop=True)
+
+        if is_inverted:
+            # For inverted pairs (e.g., USD/CHF), we need 1/rate to get CHF/USD
+            # USD/CHF ask (to buy USD with CHF) -> CHF/USD bid (to sell CHF for USD) = 1/ask
+            # USD/CHF bid (to sell USD for CHF) -> CHF/USD ask (to buy CHF with USD) = 1/bid
+            usd_df['usd_ask_px_0'] = 1.0 / usd_df['bid_px_0']  # Inverted: ask becomes 1/bid
+            usd_df['usd_bid_px_0'] = 1.0 / usd_df['ask_px_0']  # Inverted: bid becomes 1/ask
+            print(f"[DEBUG] Inverted USD prices - sample: ask={usd_df['usd_ask_px_0'].iloc[0]:.4f}, bid={usd_df['usd_bid_px_0'].iloc[0]:.4f}")
+        else:
+            usd_df = usd_df.rename(columns={
+                'ask_px_0': 'usd_ask_px_0',
+                'bid_px_0': 'usd_bid_px_0'
+            })
+
+        usd_df = usd_df.drop(columns=['instrument', 'ask_px_0', 'bid_px_0'], errors='ignore')
+
+        # Merge on ts_server using asof merge (nearest timestamp)
+        main_df = pd.merge_asof(
+            main_df.sort_values('ts_server'),
+            usd_df.sort_values('ts_server'),
+            on='ts_server',
+            direction='nearest'
+        )
+        main_df = main_df.sort_values('t_from_deal').reset_index(drop=True)
+    else:
+        # Already in USD - copy prices to usd columns
+        if usd_instrument:
+            available = df['instrument'].unique().tolist()
+            print(f"[DEBUG] WARNING: USD instrument {usd_instrument} NOT found!")
+            print(f"[DEBUG]   Query returned only: {available}")
+        main_df['usd_ask_px_0'] = main_df['ask_px_0']
+        main_df['usd_bid_px_0'] = main_df['bid_px_0']
+
+    # Drop ts_server column
+    main_df = main_df.drop(columns=['ts_server'])
+
+    return main_df
 
 
 def _fetch_single_neighbor(idx, deal, frame_mins, table_name, resample):
@@ -224,7 +286,7 @@ def _fetch_single_neighbor(idx, deal, frame_mins, table_name, resample):
     return idx, neighbors_df
 
 
-def _build_dataset(date: str, frame_mins: int = 15, table_name: str = "feed_kraken_tob_5",
+def _build_dataset(date: str, view: str, frame_mins: int = 15, table_name: str = "feed_kraken_tob_5",
                     resample: Optional[str] = "1s", max_workers: int = 10) -> Tuple[pd.DataFrame, dict]:
 
     # Fetch all deals for the date
@@ -263,23 +325,57 @@ def _build_dataset(date: str, frame_mins: int = 15, table_name: str = "feed_krak
     print(f"Built {len(slices_dict)} neighbor slices for {len(deals_df)} deals")
 
     for idx, row in deals_df.iterrows():
-        deal_ts = row['time']
         deal_price = row['px']
         deal_side = row['side']
+        deal_amt = row['amt']
 
         df = slices_dict[idx]
-        if deal_side == "BUY": df['ret'] = (deal_price - df['bid_px_0']) / deal_price
-        else: df['ret'] = (df['ask_px_0'] - deal_price) / deal_price
+
+        if view == "return":
+            if deal_side == "BUY":
+                # BUY: (current sell price - entry price) / entry price
+                df['ret'] = (df['bid_px_0'] - deal_price) / deal_price
+            else:
+                # SELL: (entry price - current buyback price) / entry price
+                df['ret'] = (deal_price - df['ask_px_0']) / deal_price
+
+        if view == "usd_pnl":
+            # Get USD price at t=0 to convert deal price to USD
+            t0_row = df[df['t_from_deal'] == 0]
+            if not t0_row.empty:
+                usd_px_at_t0 = t0_row['usd_ask_px_0'].iloc[0]
+            else:
+                usd_px_at_t0 = df['usd_ask_px_0'].iloc[0]  # fallback to first row
+
+            # USD deal volume = price * amount * usd conversion rate
+            deal_volume_usd = deal_price * deal_amt * usd_px_at_t0
+
+            if deal_side == "BUY":
+                # BUY: current sell value - entry cost = profit if price went up
+                df['pnl_usd'] = df['bid_px_0'] * deal_amt * df['usd_bid_px_0'] - deal_volume_usd
+            else:
+                # SELL: entry proceeds - current buyback cost = profit if price went down
+                df['pnl_usd'] = deal_volume_usd - df['ask_px_0'] * deal_amt * df['usd_ask_px_0']
 
         slices_dict[idx] = df
 
-    print(slices_dict)
+    # print(slices_dict)
+    # Debug: print only BTC/CHF slices
+    for idx, row in deals_df.iterrows():
+        if 'BTC/CHF' in row['instrument']:
+            print(f"\n[DEBUG] BTC/CHF Deal idx={idx}:")
+            print(f"  deal_price={row['px']}, deal_amt={row['amt']}, side={row['side']}")
+            if idx in slices_dict:
+                df = slices_dict[idx]
+                print(f"  usd_ask_px_0 at t=0: {df[df['t_from_deal']==0]['usd_ask_px_0'].values}")
+                print(f"  usd_bid_px_0 at t=0: {df[df['t_from_deal']==0]['usd_bid_px_0'].values}")
+                print(f"  bid_px_0 at t=0: {df[df['t_from_deal']==0]['bid_px_0'].values}")
+                print(f"  ask_px_0 at t=0: {df[df['t_from_deal']==0]['ask_px_0'].values}")
+                if 'pnl_usd' in df.columns:
+                    print(f"  pnl_usd at t=0: {df[df['t_from_deal']==0]['pnl_usd'].values}")
+                    print(f"  pnl_usd min/max: {df['pnl_usd'].min():.2f} / {df['pnl_usd'].max():.2f}")
 
     return deals_df, slices_dict
-
-
-def _agg_dataset(df, agg=None):
-    if not agg: return df
 
 
 def get_widget_layout(n_intervals):
@@ -329,6 +425,21 @@ def get_widget_layout(n_intervals):
                     'border': '1px solid #e0e0e0',
                     'marginBottom': '12px'
                 }
+            ),
+        ]),
+
+        # View type dropdown
+        html.Div([
+            html.Label("View:", style={'fontWeight': '600', 'marginBottom': '8px', 'display': 'block', 'color': '#2c3e50'}),
+            dcc.Dropdown(
+                id='decay-view-dropdown',
+                options=[
+                    {'label': 'Return (%)', 'value': 'return'},
+                    {'label': 'USD PnL', 'value': 'usd_pnl'},
+                ],
+                value='return',
+                clearable=False,
+                style={'marginBottom': '12px'}
             ),
         ]),
 

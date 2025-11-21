@@ -21,7 +21,8 @@ server = app.server
 # Server-side storage for decay data (too large for dcc.Store)
 DECAY_DATA_CACHE = {
     'deals': None,
-    'slices': None
+    'slices': None,
+    'view': None
 }
 
 # Define the layout for the main app
@@ -187,10 +188,11 @@ def initialize_decay_widget(pathname):
      Output('decay-status', 'children')],
     [Input('decay-load-button', 'n_clicks'),
      Input('decay-refresh-button', 'n_clicks')],
-    [State('decay-date-input', 'value')],
+    [State('decay-date-input', 'value'),
+     State('decay-view-dropdown', 'value')],
     prevent_initial_call=False
 )
-def load_decay_data(load_clicks, refresh_clicks, date_str):
+def load_decay_data(load_clicks, refresh_clicks, date_str, view):
     """Load deals and neighbor data, populate filter options."""
     import pandas as pd
     import numpy as np
@@ -225,10 +227,10 @@ def load_decay_data(load_clicks, refresh_clicks, date_str):
             return [], [], [], [], [], ""
 
         try:
-            print(f"[DEBUG] Loading data for date: {date_str}")
+            print(f"[DEBUG] Loading data for date: {date_str}, view: {view}")
 
             # Fetch data
-            deals_df, slices_dict = decay._build_dataset(date_str)
+            deals_df, slices_dict = decay._build_dataset(date_str, view=view)
 
             if deals_df.empty:
                 return [], [], [], [], [], f"No deals found for {date_str}"
@@ -255,6 +257,7 @@ def load_decay_data(load_clicks, refresh_clicks, date_str):
                 slices_data[str(idx)] = df_dict
 
             DECAY_DATA_CACHE['slices'] = slices_data
+            DECAY_DATA_CACHE['view'] = view
 
             # Generate filter options (sorted for better UX)
             instruments = [{'label': inst, 'value': inst} for inst in sorted(deals_df['instrument'].unique())]
@@ -294,6 +297,10 @@ def update_decay_graph(status, instruments, sides, order_kinds, order_types, tif
     # Get data from server-side cache
     deals_data = DECAY_DATA_CACHE['deals']
     slices_data = DECAY_DATA_CACHE['slices']
+    view = DECAY_DATA_CACHE.get('view', 'return')
+
+    # Set y-axis label based on view
+    yaxis_label = "Return (%)" if view == "return" else "USD PnL"
 
     print(f"[DEBUG] update_decay_graph called:")
     print(f"  deals_data is None: {deals_data is None}")
@@ -311,7 +318,7 @@ def update_decay_graph(status, instruments, sides, order_kinds, order_types, tif
             margin=dict(l=40, r=20, t=60, b=40),
             template="plotly_white",
             xaxis_title="Time from Deal (sec)",
-            yaxis_title="Return",
+            yaxis_title=yaxis_label,
             annotations=[
                 dict(
                     text="Load data to see decay plots",
@@ -362,15 +369,18 @@ def update_decay_graph(status, instruments, sides, order_kinds, order_types, tif
     legend_added = set()
 
     # Plot each filtered deal's neighbor data
+    # Select the correct column based on view
+    y_column = 'pnl_usd' if view == 'usd_pnl' else 'ret'
+
     traces_added = 0
     for idx in filtered_deals.index:
         if str(idx) in slices_data:
             slice_dict = slices_data[str(idx)]
             t_from_deal = slice_dict.get('t_from_deal', [])
 
-            ret = slice_dict.get('ret', [])
+            y_data = slice_dict.get(y_column, [])
 
-            if ret and t_from_deal:
+            if y_data and t_from_deal:
                 deal = filtered_deals.loc[idx]
                 instrument = deal['instrument']
 
@@ -381,17 +391,18 @@ def update_decay_graph(status, instruments, sides, order_kinds, order_types, tif
 
                 fig.add_trace(go.Scatter(
                     x=t_from_deal,
-                    y=ret,
+                    y=y_data,
                     mode='lines',
                     name=instrument,
                     legendgroup=instrument,
                     showlegend=show_legend,
                     opacity=0.6,
-                    line=dict(width=1.5, color=color_map.get(instrument, '#636EFA'))
+                    line=dict(width=1.5, color=color_map.get(instrument, '#636EFA')),
+                    hovertemplate=f"<b>{instrument}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
                 ))
                 traces_added += 1
             else:
-                print(f"[DEBUG] Skipping idx {idx}: ret={len(ret) if ret else 0}, t_from_deal={len(t_from_deal)}")
+                print(f"[DEBUG] Skipping idx {idx}: y_data={len(y_data) if y_data else 0}, t_from_deal={len(t_from_deal)}")
 
     print(f"[DEBUG] Added {traces_added} traces to graph")
 
@@ -422,7 +433,7 @@ def update_decay_graph(status, instruments, sides, order_kinds, order_types, tif
         margin=dict(l=40, r=20, t=60, b=40),
         template="plotly_white",
         xaxis_title="Time from Deal (sec)",
-        yaxis_title="Return",
+        yaxis_title=yaxis_label,
         hovermode='closest',
         showlegend=True,
         legend=dict(
