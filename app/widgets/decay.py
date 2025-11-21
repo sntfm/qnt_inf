@@ -207,65 +207,6 @@ def _fetch_neighbors(instrument: str, ts_start: datetime, frame_mins: int = 15,
 
     return df
 
-def _fetch_all_market_data(deals_df: pd.DataFrame, frame_mins: int = 15,
-                           table_name: str = "feed_kraken_tob_5",
-                           resample: Optional[str] = "1s") -> pd.DataFrame:
-    """
-    Fetch all market data for all deals in one query.
-
-    Returns DataFrame with columns: ts_server, instrument, ask_px_0, bid_px_0
-    """
-    if deals_df.empty:
-        return pd.DataFrame()
-
-    # Calculate overall time range
-    min_time = deals_df['time'].min() - pd.Timedelta(minutes=frame_mins)
-    max_time = deals_df['time'].max() + pd.Timedelta(minutes=frame_mins)
-
-    # Get unique instruments
-    instruments = deals_df['instrument'].unique().tolist()
-
-    # Format timestamps
-    fmt = '%Y-%m-%dT%H:%M:%S.%fZ'
-    min_time_str = min_time.strftime(fmt)
-    max_time_str = max_time.strftime(fmt)
-
-    # Build SQL with IN clause for instruments
-    instruments_str = "', '".join(instruments)
-
-    if resample is not None:
-        sql = f"""
-            SELECT ts_server, instrument,
-                   last(ask_px_0) as ask_px_0,
-                   last(bid_px_0) as bid_px_0
-            FROM {table_name}
-            WHERE ts_server BETWEEN '{min_time_str}' AND '{max_time_str}'
-              AND instrument IN ('{instruments_str}')
-            SAMPLE BY {resample}
-            ALIGN TO CALENDAR
-        """
-    else:
-        sql = f"""
-            SELECT ts_server, instrument, ask_px_0, bid_px_0
-            FROM {table_name}
-            WHERE ts_server BETWEEN '{min_time_str}' AND '{max_time_str}'
-              AND instrument IN ('{instruments_str}')
-            ORDER BY ts_server
-        """
-
-    print(f"[DEBUG] Fetching market data from {min_time_str} to {max_time_str} for {len(instruments)} instruments")
-
-    # Execute query (no params since we're using string formatting for IN clause)
-    df = _run_query(sql, ())
-
-    # Convert ts_server to datetime
-    if not df.empty and 'ts_server' in df.columns:
-        df['ts_server'] = pd.to_datetime(df['ts_server'], utc=True)
-
-    print(f"[DEBUG] Fetched {len(df)} market data rows")
-
-    return df
-
 
 def _fetch_single_neighbor(idx, deal, frame_mins, table_name, resample):
     """Helper function to fetch neighbors for a single deal (for parallel execution)."""
@@ -321,7 +262,24 @@ def _build_dataset(date: str, frame_mins: int = 15, table_name: str = "feed_krak
 
     print(f"Built {len(slices_dict)} neighbor slices for {len(deals_df)} deals")
 
+    for idx, row in deals_df.iterrows():
+        deal_ts = row['time']
+        deal_price = row['px']
+        deal_side = row['side']
+
+        df = slices_dict[idx]
+        if deal_side == "BUY": df['ret'] = (deal_price - df['bid_px_0']) / deal_price
+        else: df['ret'] = (df['ask_px_0'] - deal_price) / deal_price
+
+        slices_dict[idx] = df
+
+    print(slices_dict)
+
     return deals_df, slices_dict
+
+
+def _agg_dataset(df, agg=None):
+    if not agg: return df
 
 
 def get_widget_layout(n_intervals):

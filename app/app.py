@@ -279,13 +279,14 @@ def load_decay_data(load_clicks, refresh_clicks, date_str):
 
 @app.callback(
     Output('decay-graph', 'figure'),
-    [Input('decay-instrument-filter', 'value'),
+    [Input('decay-status', 'children'),
+     Input('decay-instrument-filter', 'value'),
      Input('decay-side-filter', 'value'),
      Input('decay-orderkind-filter', 'value'),
      Input('decay-ordertype-filter', 'value'),
      Input('decay-tif-filter', 'value')]
 )
-def update_decay_graph(instruments, sides, order_kinds, order_types, tifs):
+def update_decay_graph(status, instruments, sides, order_kinds, order_types, tifs):
     """Update graph based on filtered deals."""
     import pandas as pd
     import plotly.express as px
@@ -309,8 +310,8 @@ def update_decay_graph(instruments, sides, order_kinds, order_types, tifs):
         fig.update_layout(
             margin=dict(l=40, r=20, t=60, b=40),
             template="plotly_white",
-            xaxis_title="Time from Deal (index steps)",
-            yaxis_title="Mid Price",
+            xaxis_title="Time from Deal (sec)",
+            yaxis_title="Return",
             annotations=[
                 dict(
                     text="Load data to see decay plots",
@@ -367,13 +368,9 @@ def update_decay_graph(instruments, sides, order_kinds, order_types, tifs):
             slice_dict = slices_data[str(idx)]
             t_from_deal = slice_dict.get('t_from_deal', [])
 
-            # Get mid price
-            ask_px = slice_dict.get('ask_px_0', [])
-            bid_px = slice_dict.get('bid_px_0', [])
+            ret = slice_dict.get('ret', [])
 
-            if ask_px and bid_px and t_from_deal:
-                mid_px = [(a + b) / 2 for a, b in zip(ask_px, bid_px)]
-
+            if ret and t_from_deal:
                 deal = filtered_deals.loc[idx]
                 instrument = deal['instrument']
 
@@ -384,7 +381,7 @@ def update_decay_graph(instruments, sides, order_kinds, order_types, tifs):
 
                 fig.add_trace(go.Scatter(
                     x=t_from_deal,
-                    y=mid_px,
+                    y=ret,
                     mode='lines',
                     name=instrument,
                     legendgroup=instrument,
@@ -394,7 +391,7 @@ def update_decay_graph(instruments, sides, order_kinds, order_types, tifs):
                 ))
                 traces_added += 1
             else:
-                print(f"[DEBUG] Skipping idx {idx}: ask_px={len(ask_px)}, bid_px={len(bid_px)}, t_from_deal={len(t_from_deal)}")
+                print(f"[DEBUG] Skipping idx {idx}: ret={len(ret) if ret else 0}, t_from_deal={len(t_from_deal)}")
 
     print(f"[DEBUG] Added {traces_added} traces to graph")
 
@@ -424,8 +421,8 @@ def update_decay_graph(instruments, sides, order_kinds, order_types, tifs):
     fig.update_layout(
         margin=dict(l=40, r=20, t=60, b=40),
         template="plotly_white",
-        xaxis_title="Time from Deal (index steps)",
-        yaxis_title="Mid Price",
+        xaxis_title="Time from Deal (sec)",
+        yaxis_title="Return",
         hovermode='closest',
         showlegend=True,
         legend=dict(
