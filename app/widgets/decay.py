@@ -256,13 +256,28 @@ def _fetch_neighbors(instrument: str, ts_start: datetime, frame_mins: int = 15,
         )
         main_df = main_df.sort_values('t_from_deal').reset_index(drop=True)
     else:
-        # Already in USD - copy prices to usd columns
-        if usd_instrument:
+        # Check if instrument is already USD-denominated (quote currency is USD)
+        # e.g., BTC/USD_SPOT -> quote is USD, so conversion rate is 1.0
+        is_usd_denominated = '/USD_SPOT' in instrument or '/USD' in instrument.split('_')[0]
+
+        if is_usd_denominated:
+            # Already in USD - use 1.0 as conversion rate
+            print(f"[DEBUG] {instrument} is USD-denominated, using 1.0 as conversion rate")
+            main_df['usd_ask_px_0'] = 1.0
+            main_df['usd_bid_px_0'] = 1.0
+        elif usd_instrument:
+            # USD conversion instrument was expected but not found
             available = df['instrument'].unique().tolist()
             print(f"[DEBUG] WARNING: USD instrument {usd_instrument} NOT found!")
             print(f"[DEBUG]   Query returned only: {available}")
-        main_df['usd_ask_px_0'] = main_df['ask_px_0']
-        main_df['usd_bid_px_0'] = main_df['bid_px_0']
+            # Fallback: use 1.0 to avoid incorrect multiplier
+            main_df['usd_ask_px_0'] = 1.0
+            main_df['usd_bid_px_0'] = 1.0
+        else:
+            # No USD conversion needed and not USD-denominated - shouldn't happen often
+            print(f"[DEBUG] WARNING: {instrument} not in USD_CONVERSION_MAP and not USD-denominated")
+            main_df['usd_ask_px_0'] = 1.0
+            main_df['usd_bid_px_0'] = 1.0
 
     # Drop ts_server column
     main_df = main_df.drop(columns=['ts_server'])
