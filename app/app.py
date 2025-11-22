@@ -176,145 +176,267 @@ def initialize_decay_widget(pathname):
             ])
     return html.Div()
 
-# Decay widget callbacks
+# Decay widget callback - Plot button
 @app.callback(
-    [Output('decay-instrument-filter', 'options'),
+    [Output('decay-graph', 'figure'),
+     Output('decay-instrument-filter', 'options'),
      Output('decay-side-filter', 'options'),
      Output('decay-orderkind-filter', 'options'),
      Output('decay-ordertype-filter', 'options'),
      Output('decay-tif-filter', 'options'),
      Output('decay-status', 'children')],
-    [Input('decay-load-button', 'n_clicks'),
-     Input('decay-refresh-button', 'n_clicks')],
-    [State('decay-date-input', 'value'),
-     State('decay-view-dropdown', 'value')],
-    prevent_initial_call=False
+    [Input('decay-plot-button', 'n_clicks'),
+     Input('decay-start-datetime', 'value'),
+     Input('decay-end-datetime', 'value')],
+    [State('decay-view-dropdown', 'value'),
+     State('decay-instrument-filter', 'value'),
+     State('decay-side-filter', 'value'),
+     State('decay-orderkind-filter', 'value'),
+     State('decay-ordertype-filter', 'value'),
+     State('decay-tif-filter', 'value'),
+     State('decay-aggregate-dropdown', 'value')],
+    prevent_initial_call=True
 )
-def load_decay_data(load_clicks, refresh_clicks, date_str, view):
-    """Load deals and neighbor data, populate filter options."""
-    import pandas as pd
-    import numpy as np
-
-    ctx = callback_context
-
-    if not ctx.triggered:
-        return [], [], [], [], [], ""
-
-    button_id = ctx.triggered[0]['prop_id'].split('.')[0]
-
-    # If refresh button clicked, use cached data to regenerate filters
-    if button_id == 'decay-refresh-button':
-        if DECAY_DATA_CACHE['deals'] is not None:
-            deals_df = pd.DataFrame(DECAY_DATA_CACHE['deals'])
-
-            # Regenerate filter options from stored data
-            instruments = [{'label': inst, 'value': inst} for inst in sorted(deals_df['instrument'].unique())]
-            sides = [{'label': side, 'value': side} for side in sorted(deals_df['side'].unique())]
-            order_kinds = [{'label': ok, 'value': ok} for ok in sorted(deals_df['orderKind'].dropna().unique())]
-            order_types = [{'label': ot, 'value': ot} for ot in sorted(deals_df['orderType'].dropna().unique())]
-            tifs = [{'label': tif, 'value': tif} for tif in sorted(deals_df['tif'].dropna().unique())]
-
-            status = f"Filters refreshed - {len(deals_df)} deals loaded"
-            return instruments, sides, order_kinds, order_types, tifs, status
-        else:
-            return [], [], [], [], [], "No data loaded yet. Click 'Load Data' first."
-
-    # If load button clicked
-    if button_id == 'decay-load-button':
-        if not load_clicks or load_clicks == 0:
-            return [], [], [], [], [], ""
-
-        try:
-            print(f"[DEBUG] Loading data for date: {date_str}, view: {view}")
-
-            # Fetch data
-            deals_df, slices_dict = decay._build_dataset(date_str, view=view)
-
-            if deals_df.empty:
-                return [], [], [], [], [], f"No deals found for {date_str}"
-
-            print(f"[DEBUG] deals_df columns: {deals_df.columns.tolist()}")
-            print(f"[DEBUG] deals_df shape: {deals_df.shape}")
-
-            # Convert timestamps to strings
-            deals_df_copy = deals_df.copy()
-            if 'time' in deals_df_copy.columns:
-                deals_df_copy['time'] = deals_df_copy['time'].astype(str)
-
-            # Store in server-side cache instead of dcc.Store
-            DECAY_DATA_CACHE['deals'] = deals_df_copy.to_dict('records')
-
-            # Convert slices_dict to dict format
-            slices_data = {}
-            for idx, df in slices_dict.items():
-                df_dict = {}
-                for col in df.columns:
-                    col_data = df[col].tolist()
-                    col_data = [float(x) if isinstance(x, (np.integer, np.floating)) else x for x in col_data]
-                    df_dict[col] = col_data
-                slices_data[str(idx)] = df_dict
-
-            DECAY_DATA_CACHE['slices'] = slices_data
-            DECAY_DATA_CACHE['view'] = view
-
-            # Generate filter options (sorted for better UX)
-            instruments = [{'label': inst, 'value': inst} for inst in sorted(deals_df['instrument'].unique())]
-            sides = [{'label': side, 'value': side} for side in sorted(deals_df['side'].unique())]
-            order_kinds = [{'label': ok, 'value': ok} for ok in sorted(deals_df['orderKind'].dropna().unique())]
-            order_types = [{'label': ot, 'value': ot} for ot in sorted(deals_df['orderType'].dropna().unique())]
-            tifs = [{'label': tif, 'value': tif} for tif in sorted(deals_df['tif'].dropna().unique())]
-
-            status = f"Loaded {len(deals_df)} deals with {len(slices_dict)} neighbor slices"
-            print(f"[DEBUG] Data stored in server-side cache. Status: {status}")
-
-            return instruments, sides, order_kinds, order_types, tifs, status
-
-        except Exception as e:
-            import traceback
-            traceback.print_exc()
-            return [], [], [], [], [], f"Error: {str(e)}"
-
-    # Default return if no button was clicked
-    return [], [], [], [], [], ""
-
-
-@app.callback(
-    Output('decay-graph', 'figure'),
-    [Input('decay-status', 'children'),
-     Input('decay-instrument-filter', 'value'),
-     Input('decay-side-filter', 'value'),
-     Input('decay-orderkind-filter', 'value'),
-     Input('decay-ordertype-filter', 'value'),
-     Input('decay-tif-filter', 'value'),
-     Input('decay-aggregate-dropdown', 'value'),
-     Input('decay-show-legend', 'value')]
-)
-def update_decay_graph(status, instruments, sides, order_kinds, order_types, tifs, aggregate, legend_visible):
-    """Update graph based on filtered deals."""
+def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
+                    instruments, sides, order_kinds, order_types, tifs, aggregate):
+    """Fetch filtered data and plot it."""
     import pandas as pd
     import numpy as np
     import plotly.express as px
+    from dash import callback_context, no_update
 
-    # Get data from server-side cache
-    deals_data = DECAY_DATA_CACHE['deals']
-    slices_data = DECAY_DATA_CACHE['slices']
-    view = DECAY_DATA_CACHE.get('view', 'return')
+    ctx = callback_context
+    if not ctx.triggered:
+        return no_update, no_update, no_update, no_update, no_update, no_update, no_update
 
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
+
+    # If triggered by datetime change (Enter or Blur), only update filters
+    if trigger_id in ['decay-start-datetime', 'decay-end-datetime']:
+        print(f"[DEBUG] Fetching filter options for {start_datetime} to {end_datetime}")
+        options = decay.get_filter_options(start_datetime, end_datetime)
+
+        status = f"Filters updated for range {start_datetime} to {end_datetime}"
+        return (
+            no_update, # graph
+            options.get('instruments', []),
+            options.get('sides', []),
+            options.get('order_kinds', []),
+            options.get('order_types', []),
+            options.get('tifs', []),
+            status
+        )
+    
+    # Otherwise (Plot button), proceed with full data fetch and plot
+    
     # Set y-axis label based on view
     yaxis_label = "Return (%)" if view == "return" else "USD PnL"
+    
+    try:
+        print(f"[DEBUG] Plotting data for datetime range: {start_datetime} to {end_datetime}, view: {view}")
+        print(f"[DEBUG] Filters: instruments={instruments}, sides={sides}, order_kinds={order_kinds}, order_types={order_types}, tifs={tifs}")
+        
+        # Fetch data for the datetime range
+        deals_df, slices_dict = decay._build_dataset(start_datetime, end_datetime, view=view)
+        
+        if deals_df.empty:
+            fig = go.Figure()
+            fig.update_layout(
+                margin=dict(l=40, r=20, t=60, b=40),
+                template="plotly_white",
+                xaxis_title="Time from Deal (sec)",
+                yaxis_title=yaxis_label,
+                annotations=[
+                    dict(
+                        text=f"No deals found for {start_datetime} to {end_datetime}",
+                        xref="paper",
+                        yref="paper",
+                        x=0.5,
+                        y=0.5,
+                        showarrow=False,
+                        font=dict(size=14, color="#e74c3c"),
+                    )
+                ],
+            )
+            return fig, [], [], [], [], [], f"No deals found for {start_datetime} to {end_datetime}"
+        
+        print(f"[DEBUG] Found {len(deals_df)} deals, {len(slices_dict)} slices")
+        
+        # Generate filter options from ALL data (before filtering)
+        all_instruments = [{'label': inst, 'value': inst} for inst in sorted(deals_df['instrument'].unique())]
+        all_sides = [{'label': side, 'value': side} for side in sorted(deals_df['side'].unique())]
+        all_order_kinds = [{'label': ok, 'value': ok} for ok in sorted(deals_df['orderKind'].dropna().unique())]
+        all_order_types = [{'label': ot, 'value': ot} for ot in sorted(deals_df['orderType'].dropna().unique())]
+        all_tifs = [{'label': tif, 'value': tif} for tif in sorted(deals_df['tif'].dropna().unique())]
+        
+        # Apply filters to deals
+        mask = pd.Series([True] * len(deals_df))
+        if instruments:
+            mask &= deals_df['instrument'].isin(instruments)
+        if sides:
+            mask &= deals_df['side'].isin(sides)
+        if order_kinds:
+            mask &= deals_df['orderKind'].isin(order_kinds)
+        if order_types:
+            mask &= deals_df['orderType'].isin(order_types)
+        if tifs:
+            mask &= deals_df['tif'].isin(tifs)
+        
+        filtered_deals = deals_df[mask]
+        print(f"[DEBUG] After filtering: {len(filtered_deals)} deals")
+        
+        if filtered_deals.empty:
+            fig = go.Figure()
+            fig.update_layout(
+                margin=dict(l=40, r=20, t=60, b=40),
+                template="plotly_white",
+                xaxis_title="Time from Deal (sec)",
+                yaxis_title=yaxis_label,
+                annotations=[
+                    dict(
+                        text="No data matches current filters",
+                        xref="paper",
+                        yref="paper",
+                        x=0.5,
+                        y=0.5,
+                        showarrow=False,
+                        font=dict(size=14, color="#e74c3c"),
+                    )
+                ],
+            )
+            status = f"Loaded {len(deals_df)} deals, 0 match filters"
+            return fig, all_instruments, all_sides, all_order_kinds, all_order_types, all_tifs, status
+        
+        # Create figure
+        fig = go.Figure()
+        
+        # Create color map for instruments
+        unique_instruments = sorted(filtered_deals['instrument'].unique())
+        colors = px.colors.qualitative.Plotly
+        color_map = {inst: colors[i % len(colors)] for i, inst in enumerate(unique_instruments)}
+        
+        # Track which instruments have been added to legend
+        legend_added = set()
+        
+        # Select the correct column based on view
+        y_column = 'pnl_usd' if view == 'usd_pnl' else 'ret'
+        
+        traces_added = 0
+        
+        if aggregate == 'vwa':
+            # Volume Weighted Average aggregation per instrument
+            for instrument in unique_instruments:
+                inst_deals = filtered_deals[filtered_deals['instrument'] == instrument]
+                
+                # Collect all slices for this instrument with their USD volumes
+                inst_slices = []
+                inst_volumes = []
+                
+                for idx in inst_deals.index:
+                    if idx not in slices_dict:
+                        continue
+                    
+                    slice_df = slices_dict[idx]
+                    if slice_df.empty:
+                        continue
+                    
+                    deal = inst_deals.loc[idx]
+                    # Calculate USD volume for weighting
+                    usd_volume = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else deal['px'] * deal['amt']
+                    
+                    inst_slices.append(slice_df[['t_from_deal', y_column]].copy())
+                    inst_volumes.append(usd_volume)
+                
+                if not inst_slices:
+                    continue
+                
+                # Combine all slices and compute VWA at each t_from_deal
+                all_t = sorted(set().union(*[set(s['t_from_deal']) for s in inst_slices]))
+                
+                vwa_y = []
+                for t in all_t:
+                    weighted_sum = 0.0
+                    total_weight = 0.0
+                    for slice_df, volume in zip(inst_slices, inst_volumes):
+                        matching = slice_df[slice_df['t_from_deal'] == t]
+                        if not matching.empty:
+                            weighted_sum += matching[y_column].iloc[0] * volume
+                            total_weight += volume
+                    if total_weight > 0:
+                        vwa_y.append(weighted_sum / total_weight)
+                    else:
+                        vwa_y.append(np.nan)
+                
+                # Plot the VWA line for this instrument
+                fig.add_trace(go.Scatter(
+                    x=all_t,
+                    y=vwa_y,
+                    mode='lines',
+                    name=f"{instrument} (VWA)",
+                    legendgroup=instrument,
+                    showlegend=True,
+                    opacity=0.9,
+                    line=dict(width=2.5, color=color_map.get(instrument, '#636EFA')),
+                    hovertemplate=f"<b>{instrument} (VWA)</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
+                ))
+                traces_added += 1
+        else:
+            # No aggregation - show all individual lines
+            for idx in filtered_deals.index:
+                if idx in slices_dict:
+                    slice_df = slices_dict[idx]
+                    
+                    if slice_df.empty or y_column not in slice_df.columns:
+                        continue
+                    
+                    t_from_deal = slice_df['t_from_deal'].tolist()
+                    y_data = slice_df[y_column].tolist()
+                    
+                    if y_data and t_from_deal:
+                        deal = filtered_deals.loc[idx]
+                        instrument = deal['instrument']
+                        
+                        # Only show instrument name in legend (once per instrument)
+                        show_legend = instrument not in legend_added
+                        if show_legend:
+                            legend_added.add(instrument)
+                        
+                        fig.add_trace(go.Scatter(
+                            x=t_from_deal,
+                            y=y_data,
+                            mode='lines',
+                            name=instrument,
+                            legendgroup=instrument,
+                            showlegend=show_legend,
+                            opacity=0.6,
+                            line=dict(width=1.5, color=color_map.get(instrument, '#636EFA')),
+                            hovertemplate=f"<b>{instrument}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
+                        ))
+                        traces_added += 1
+        
+        print(f"[DEBUG] Added {traces_added} traces to graph")
+        
+        # Add reference lines at x=0 and y=0
+        if traces_added > 0:
+            fig.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5, annotation_text="t=0")
+            fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
+        
+        fig.update_layout(
+            margin=dict(l=40, r=20, t=60, b=40),
+            template="plotly_white",
+            xaxis_title="Time from Deal (sec)",
+            yaxis_title=yaxis_label,
+            hovermode='closest',
+            showlegend=False,
+        )
 
-    print(f"[DEBUG] update_decay_graph called:")
-    print(f"  deals_data is None: {deals_data is None}")
-    print(f"  slices_data is None: {slices_data is None}")
-    print(f"  instruments: {instruments}")
-    print(f"  sides: {sides}")
-    print(f"  order_kinds: {order_kinds}")
-    print(f"  order_types: {order_types}")
-    print(f"  tifs: {tifs}")
-    print(f"  aggregate: {aggregate}")
+        status = f"Plotted {len(filtered_deals)} of {len(deals_df)} deals"
+        return fig, all_instruments, all_sides, all_order_kinds, all_order_types, all_tifs, status
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
 
-    if deals_data is None or slices_data is None:
-        # Return empty figure
         fig = go.Figure()
         fig.update_layout(
             margin=dict(l=40, r=20, t=60, b=40),
@@ -323,176 +445,7 @@ def update_decay_graph(status, instruments, sides, order_kinds, order_types, tif
             yaxis_title=yaxis_label,
             annotations=[
                 dict(
-                    text="Load data to see decay plots",
-                    xref="paper",
-                    yref="paper",
-                    x=0.5,
-                    y=0.5,
-                    showarrow=False,
-                    font=dict(size=14, color="#7f8c8d"),
-                )
-            ],
-        )
-        return fig
-
-    # Convert back to DataFrame
-    deals_df = pd.DataFrame(deals_data)
-    print(f"[DEBUG] deals_df shape: {deals_df.shape}")
-    print(f"[DEBUG] deals_df columns: {deals_df.columns.tolist()}")
-    print(f"[DEBUG] slices_data keys: {list(slices_data.keys())[:5]}...")  # Show first 5
-
-    # Apply filters
-    mask = pd.Series([True] * len(deals_df))
-
-    if instruments:
-        mask &= deals_df['instrument'].isin(instruments)
-    if sides:
-        mask &= deals_df['side'].isin(sides)
-    if order_kinds:
-        mask &= deals_df['orderKind'].isin(order_kinds)
-    if order_types:
-        mask &= deals_df['orderType'].isin(order_types)
-    if tifs:
-        mask &= deals_df['tif'].isin(tifs)
-
-    filtered_deals = deals_df[mask]
-    print(f"[DEBUG] filtered_deals shape: {filtered_deals.shape}")
-
-    # Create figure
-    fig = go.Figure()
-
-    # Create color map for instruments using plotly default colors
-    unique_instruments = sorted(filtered_deals['instrument'].unique()) if not filtered_deals.empty else []
-    import plotly.express as px
-    colors = px.colors.qualitative.Plotly
-    color_map = {inst: colors[i % len(colors)] for i, inst in enumerate(unique_instruments)}
-
-    # Track which instruments have been added to legend
-    legend_added = set()
-
-    # Plot each filtered deal's neighbor data
-    # Select the correct column based on view
-    y_column = 'pnl_usd' if view == 'usd_pnl' else 'ret'
-
-    traces_added = 0
-
-    if aggregate == 'vwa':
-        # Volume Weighted Average aggregation per instrument
-        # Group deals by instrument and compute VWA of y values at each t_from_deal
-        for instrument in unique_instruments:
-            inst_deals = filtered_deals[filtered_deals['instrument'] == instrument]
-
-            # Collect all slices for this instrument with their USD volumes
-            inst_slices = []
-            inst_volumes = []
-
-            for idx in inst_deals.index:
-                if str(idx) not in slices_data:
-                    continue
-
-                slice_dict = slices_data[str(idx)]
-                t_from_deal = slice_dict.get('t_from_deal', [])
-                y_data = slice_dict.get(y_column, [])
-
-                if not y_data or not t_from_deal:
-                    continue
-
-                deal = inst_deals.loc[idx]
-                # Calculate USD volume for weighting
-                usd_volume = deal['px'] * deal['amt']
-                # Get USD conversion rate at t=0 if available
-                usd_px_0 = slice_dict.get('usd_ask_px_0', [1.0])
-                if usd_px_0:
-                    usd_volume *= usd_px_0[len(usd_px_0)//2] if len(usd_px_0) > 0 else 1.0
-
-                inst_slices.append(pd.DataFrame({
-                    't_from_deal': t_from_deal,
-                    'y': y_data
-                }))
-                inst_volumes.append(usd_volume)
-
-            if not inst_slices:
-                continue
-
-            # Combine all slices and compute VWA at each t_from_deal
-            # First, align all slices to common t_from_deal values
-            all_t = sorted(set().union(*[set(s['t_from_deal']) for s in inst_slices]))
-
-            vwa_y = []
-            for t in all_t:
-                weighted_sum = 0.0
-                total_weight = 0.0
-                for slice_df, volume in zip(inst_slices, inst_volumes):
-                    matching = slice_df[slice_df['t_from_deal'] == t]
-                    if not matching.empty:
-                        weighted_sum += matching['y'].iloc[0] * volume
-                        total_weight += volume
-                if total_weight > 0:
-                    vwa_y.append(weighted_sum / total_weight)
-                else:
-                    vwa_y.append(np.nan)
-
-            # Plot the VWA line for this instrument
-            fig.add_trace(go.Scatter(
-                x=all_t,
-                y=vwa_y,
-                mode='lines',
-                name=f"{instrument} (VWA)",
-                legendgroup=instrument,
-                showlegend=True,
-                opacity=0.9,
-                line=dict(width=2.5, color=color_map.get(instrument, '#636EFA')),
-                hovertemplate=f"<b>{instrument} (VWA)</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
-            ))
-            traces_added += 1
-    else:
-        # No aggregation - show all individual lines
-        for idx in filtered_deals.index:
-            if str(idx) in slices_data:
-                slice_dict = slices_data[str(idx)]
-                t_from_deal = slice_dict.get('t_from_deal', [])
-
-                y_data = slice_dict.get(y_column, [])
-
-                if y_data and t_from_deal:
-                    deal = filtered_deals.loc[idx]
-                    instrument = deal['instrument']
-
-                    # Only show instrument name in legend (once per instrument)
-                    show_legend = instrument not in legend_added
-                    if show_legend:
-                        legend_added.add(instrument)
-
-                    fig.add_trace(go.Scatter(
-                        x=t_from_deal,
-                        y=y_data,
-                        mode='lines',
-                        name=instrument,
-                        legendgroup=instrument,
-                        showlegend=show_legend,
-                        opacity=0.6,
-                        line=dict(width=1.5, color=color_map.get(instrument, '#636EFA')),
-                        hovertemplate=f"<b>{instrument}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
-                    ))
-                    traces_added += 1
-                else:
-                    print(f"[DEBUG] Skipping idx {idx}: y_data={len(y_data) if y_data else 0}, t_from_deal={len(t_from_deal)}")
-
-    print(f"[DEBUG] Added {traces_added} traces to graph")
-
-    # Add reference lines at x=0 and y=0
-    if traces_added > 0:
-        # Get y-axis range for vertical line at x=0
-        fig.add_vline(x=0, line_dash="dash", line_color="gray", opacity=0.5, annotation_text="t=0")
-        # Add horizontal line at y=0
-        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5)
-
-    if traces_added == 0:
-        # Add annotation if no traces
-        fig.update_layout(
-            annotations=[
-                dict(
-                    text="No data matches current filters",
+                    text=f"Error: {str(e)}",
                     xref="paper",
                     yref="paper",
                     x=0.5,
@@ -500,31 +453,16 @@ def update_decay_graph(status, instruments, sides, order_kinds, order_types, tif
                     showarrow=False,
                     font=dict(size=14, color="#e74c3c"),
                 )
-            ]
+            ],
         )
+        return fig, [], [], [], [], [], f"Error: {str(e)}"
 
-    fig.update_layout(
-        margin=dict(l=40, r=20, t=60, b=40),
-        template="plotly_white",
-        xaxis_title="Time from Deal (sec)",
-        yaxis_title=yaxis_label,
-        hovermode='closest',
-        showlegend=bool(legend_visible),  # legend_visible is ['show'] or []
-        legend=dict(
-            orientation="v",
-            yanchor="top",
-            y=1,
-            xanchor="left",
-            x=1.02,
-        ),
-    )
 
-    return fig
 
 if __name__ == '__main__':
     # Run the Dash app
     app.run(
-        debug=True,
+        debug=False,
         host='0.0.0.0',
         port=8050
     )
