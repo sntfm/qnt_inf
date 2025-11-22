@@ -45,6 +45,23 @@ def _fetch_convmap(cur) -> dict:
     return {row['instrument']: (row['usd_instrument'], row['is_inverted']) for row in rows}
 
 
+def _fetch_price_at(cur, instrument: str, timestamp: str):
+    """Fetch the nearest price for an instrument at or before the given timestamp."""
+    sql = f"""
+        SELECT ask_px_0, bid_px_0
+        FROM {PRICES_TABLE}
+        WHERE instrument = '{instrument}'
+          AND ts <= '{timestamp}'
+        ORDER BY ts DESC
+        LIMIT 1
+    """
+    cur.execute(sql)
+    row = cur.fetchone()
+    if row:
+        return row[0], row[1]
+    return None
+
+
 def _fetch_deals(cur, date_str: str) -> list:
     """Fetch deals for a specific date with side, amt, px for return/pnl calculations."""
     sql = f"""
@@ -121,12 +138,30 @@ def _process_deal(cur, deal, convmap: dict):
             """
     else:
         usd_instrument, is_inverted = usd_info
-        # Need to fetch entry_usd_px at deal time for pnl calculation
-        # For now, use a simpler approach: compute pnl_usd inline without subquery
-        # entry_usd = deal_px * deal_amt * usd_rate_at_deal_time
-        # We'll compute this with a CROSS JOIN to get the deal-time USD rate
+        
+        # Fetch USD rate at deal time
+        usd_prices = _fetch_price_at(cur, usd_instrument, deal_time)
+        if not usd_prices:
+            # print(f"Warning: No USD price found for {usd_instrument} at {deal_time}")
+            return
+
+        u_ask_0, u_bid_0 = usd_prices
+
         if is_inverted:
-            # Inverted: usd_ask = price / usd_bid, usd_bid = price / usd_ask
+            # Inverted: rate = 1 / price
+            # rate_ask = 1 / u_bid, rate_bid = 1 / u_ask
+            rate_ask = 1.0 / u_bid_0 if u_bid_0 else 0
+            rate_bid = 1.0 / u_ask_0 if u_ask_0 else 0
+        else:
+            rate_ask = u_ask_0
+            rate_bid = u_bid_0
+
+        # Calculate entry_usd (deal volume in USD)
+        # We use the ask rate for the entry valuation (conservative/standard approach?)
+        # Previous code used e.ask_px_0 / eu.bid_px_0 for inverted, which maps to rate_ask.
+        entry_usd = deal_px * deal_amt * rate_ask
+
+        if is_inverted:
             if deal_side == 'BUY':
                 sql = f"""
                     INSERT INTO {SLICES_TABLE} (time, instrument, t_from_deal, ask_px_0, bid_px_0, usd_ask_px_0, usd_bid_px_0, ret, pnl_usd)
@@ -139,16 +174,12 @@ def _process_deal(cur, deal, convmap: dict):
                         p.ask_px_0 / u.bid_px_0 usd_ask_px_0,
                         p.bid_px_0 / u.ask_px_0 usd_bid_px_0,
                         (p.bid_px_0 - {deal_px}) / {deal_px} ret,
-                        p.bid_px_0 * {deal_amt} * (p.bid_px_0 / u.ask_px_0) - {deal_px} * {deal_amt} * (e.ask_px_0 / eu.bid_px_0) pnl_usd
+                        p.bid_px_0 * {deal_amt} * (p.bid_px_0 / u.ask_px_0) - {entry_usd} pnl_usd
                     FROM {PRICES_TABLE} p
                     JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
-                    CROSS JOIN {PRICES_TABLE} e
-                    CROSS JOIN {PRICES_TABLE} eu
                     WHERE p.instrument = '{instrument}'
                       AND p.ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
                                    AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
-                      AND e.instrument = '{instrument}' AND e.ts = '{deal_time}'
-                      AND eu.instrument = '{usd_instrument}' AND eu.ts = '{deal_time}'
                 """
             else:
                 sql = f"""
@@ -162,19 +193,14 @@ def _process_deal(cur, deal, convmap: dict):
                         p.ask_px_0 / u.bid_px_0 usd_ask_px_0,
                         p.bid_px_0 / u.ask_px_0 usd_bid_px_0,
                         ({deal_px} - p.ask_px_0) / {deal_px} ret,
-                        {deal_px} * {deal_amt} * (e.ask_px_0 / eu.bid_px_0) - p.ask_px_0 * {deal_amt} * (p.ask_px_0 / u.bid_px_0) pnl_usd
+                        {entry_usd} - p.ask_px_0 * {deal_amt} * (p.ask_px_0 / u.bid_px_0) pnl_usd
                     FROM {PRICES_TABLE} p
                     JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
-                    CROSS JOIN {PRICES_TABLE} e
-                    CROSS JOIN {PRICES_TABLE} eu
                     WHERE p.instrument = '{instrument}'
                       AND p.ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
                                    AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
-                      AND e.instrument = '{instrument}' AND e.ts = '{deal_time}'
-                      AND eu.instrument = '{usd_instrument}' AND eu.ts = '{deal_time}'
                 """
         else:
-            # Normal: usd_ask = price * usd_ask, usd_bid = price * usd_bid
             if deal_side == 'BUY':
                 sql = f"""
                     INSERT INTO {SLICES_TABLE} (time, instrument, t_from_deal, ask_px_0, bid_px_0, usd_ask_px_0, usd_bid_px_0, ret, pnl_usd)
@@ -187,16 +213,12 @@ def _process_deal(cur, deal, convmap: dict):
                         p.ask_px_0 * u.ask_px_0 usd_ask_px_0,
                         p.bid_px_0 * u.bid_px_0 usd_bid_px_0,
                         (p.bid_px_0 - {deal_px}) / {deal_px} ret,
-                        p.bid_px_0 * {deal_amt} * (p.bid_px_0 * u.bid_px_0) - {deal_px} * {deal_amt} * (e.ask_px_0 * eu.ask_px_0) pnl_usd
+                        p.bid_px_0 * {deal_amt} * (p.bid_px_0 * u.bid_px_0) - {entry_usd} pnl_usd
                     FROM {PRICES_TABLE} p
                     JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
-                    CROSS JOIN {PRICES_TABLE} e
-                    CROSS JOIN {PRICES_TABLE} eu
                     WHERE p.instrument = '{instrument}'
                       AND p.ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
                                    AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
-                      AND e.instrument = '{instrument}' AND e.ts = '{deal_time}'
-                      AND eu.instrument = '{usd_instrument}' AND eu.ts = '{deal_time}'
                 """
             else:
                 sql = f"""
@@ -210,22 +232,23 @@ def _process_deal(cur, deal, convmap: dict):
                         p.ask_px_0 * u.ask_px_0 usd_ask_px_0,
                         p.bid_px_0 * u.bid_px_0 usd_bid_px_0,
                         ({deal_px} - p.ask_px_0) / {deal_px} ret,
-                        {deal_px} * {deal_amt} * (e.ask_px_0 * eu.ask_px_0) - p.ask_px_0 * {deal_amt} * (p.ask_px_0 * u.ask_px_0) pnl_usd
+                        {entry_usd} - p.ask_px_0 * {deal_amt} * (p.ask_px_0 * u.ask_px_0) pnl_usd
                     FROM {PRICES_TABLE} p
                     JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
-                    CROSS JOIN {PRICES_TABLE} e
-                    CROSS JOIN {PRICES_TABLE} eu
                     WHERE p.instrument = '{instrument}'
                       AND p.ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
                                    AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
-                      AND e.instrument = '{instrument}' AND e.ts = '{deal_time}'
-                      AND eu.instrument = '{usd_instrument}' AND eu.ts = '{deal_time}'
                 """
 
     cur.execute(sql)
 
-    # Update amt_usd in mart_decay_deals: amt * (usd_ask_px_0 + usd_bid_px_0) / 2 at t_from_deal = 0
-    # QuestDB doesn't support subqueries in UPDATE, so fetch first then update
+
+def _update_amt_usd(cur, deal):
+    """Update amt_usd for a deal from slices at t_from_deal=0."""
+    deal_time = deal['time']
+    instrument = deal['instrument']
+    deal_amt = deal['amt']
+
     fetch_sql = f"""
         SELECT (usd_ask_px_0 + usd_bid_px_0) / 2 AS mid_usd
         FROM {SLICES_TABLE}
@@ -266,6 +289,14 @@ def _update(date_str: str):
             print(f"Processed {len(deals)%100}/{len(deals)} deals")
             conn.commit()
 
+        # Update amt_usd after all slices are committed
+        print("Updating amt_usd")
+        with conn.cursor() as cur:
+            for idx, deal in enumerate(deals):
+                _update_amt_usd(cur, deal)
+                if (idx + 1) % 100 == 0:
+                    conn.commit()
+            conn.commit()
 
     print(f"Done processing {date_str}")
 
