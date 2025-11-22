@@ -275,7 +275,7 @@ def get_widget_layout(n_intervals):
     fig.update_layout(
         margin=dict(l=40, r=20, t=60, b=40),
         template="plotly_white",
-        xaxis_title="Time from Deal (seconds)",
+        xaxis_title="Time around Deal (s)",
         yaxis_title="Value",
         annotations=[
             dict(

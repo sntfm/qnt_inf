@@ -230,7 +230,7 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
     # Otherwise (Plot button), proceed with full data fetch and plot
     
     # Set y-axis label based on view
-    yaxis_label = "Return (%)" if view == "return" else "USD PnL"
+    yaxis_label = "Return" if view == "return" else "USD PnL"
     
     try:
         print(f"[DEBUG] Plotting data for datetime range: {start_datetime} to {end_datetime}, view: {view}")
