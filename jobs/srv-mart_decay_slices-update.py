@@ -46,9 +46,9 @@ def _fetch_convmap(cur) -> dict:
 
 
 def _fetch_deals(cur, date_str: str) -> list:
-    """Fetch deals for a specific date."""
+    """Fetch deals for a specific date with side, amt, px for return/pnl calculations."""
     sql = f"""
-        SELECT time, instrument
+        SELECT time, instrument, side, amt, px
         FROM {DEALS_TABLE}
         WHERE time BETWEEN '{date_str}T00:00:00.000000Z' AND '{date_str}T23:59:59.999999Z'
         ORDER BY time
@@ -58,68 +58,169 @@ def _fetch_deals(cur, date_str: str) -> list:
 
 
 def _process_deal(cur, deal, convmap: dict):
-    """Process a single deal - insert slices directly."""
+    """Process a single deal - insert slices directly with return and pnl_usd calculations."""
     deal_time = deal['time']
     instrument = deal['instrument']
+    deal_side = deal['side']
+    deal_amt = deal['amt']
+    deal_px = deal['px']
 
     # Get USD conversion info
     usd_info = convmap.get(instrument)
 
+    # Return calculation:
+    # BUY: (bid_px_0 - deal_px) / deal_px  (current sell price - entry price)
+    # SELL: (deal_px - ask_px_0) / deal_px  (entry price - current buyback price)
+    #
+    # PnL USD calculation:
+    # deal_volume_usd = deal_px * deal_amt * usd_px_at_t0
+    # BUY: bid_px_0 * deal_amt * usd_bid_px_0 - deal_volume_usd
+    # SELL: deal_volume_usd - ask_px_0 * deal_amt * usd_ask_px_0
+    #
+    # For usd_px_at_t0, we use usd_ask_px_0 at t=0 (deal time)
+
     if usd_info is None:
-        # No USD conversion needed - simple query
-        sql = f"""
-            INSERT INTO {SLICES_TABLE} (time, instrument, t_from_deal, ask_px_0, bid_px_0, usd_ask_px_0, usd_bid_px_0)
-            SELECT
-                '{deal_time}',
-                '{instrument}',
-                CAST(DATEDIFF('s', '{deal_time}', ts) AS INT),
-                ask_px_0,
-                bid_px_0,
-                ask_px_0,
-                bid_px_0
-            FROM {PRICES_TABLE}
-            WHERE instrument = '{instrument}'
-              AND ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
-                         AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
-        """
-    else:
-        usd_instrument, is_inverted = usd_info
-        if is_inverted:
-            # Inverted: divide by USD price
+        # No USD conversion needed - usd prices equal native prices
+        # Precompute entry_usd for pnl calculation
+        entry_usd = deal_px * deal_amt
+        if deal_side == 'BUY':
             sql = f"""
-                INSERT INTO {SLICES_TABLE} (time, instrument, t_from_deal, ask_px_0, bid_px_0, usd_ask_px_0, usd_bid_px_0)
+                INSERT INTO {SLICES_TABLE} (time, instrument, t_from_deal, ask_px_0, bid_px_0, usd_ask_px_0, usd_bid_px_0, ret, pnl_usd)
                 SELECT
-                    '{deal_time}',
-                    '{instrument}',
-                    CAST(DATEDIFF('s', '{deal_time}', p.ts) AS INT),
-                    p.ask_px_0,
-                    p.bid_px_0,
-                    p.ask_px_0 / u.bid_px_0,
-                    p.bid_px_0 / u.ask_px_0
-                FROM {PRICES_TABLE} p
-                JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
-                WHERE p.instrument = '{instrument}'
-                  AND p.ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
-                               AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
+                    CAST('{deal_time}' AS TIMESTAMP) time,
+                    CAST('{instrument}' AS SYMBOL) instrument,
+                    CAST(DATEDIFF('s', '{deal_time}', ts) AS INT) t_from_deal,
+                    ask_px_0 ask_px_0,
+                    bid_px_0 bid_px_0,
+                    ask_px_0 usd_ask_px_0,
+                    bid_px_0 usd_bid_px_0,
+                    (bid_px_0 - {deal_px}) / {deal_px} ret,
+                    bid_px_0 * {deal_amt} - {entry_usd} pnl_usd
+                FROM {PRICES_TABLE}
+                WHERE instrument = '{instrument}'
+                  AND ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
+                             AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
             """
         else:
-            # Normal: multiply by USD price
             sql = f"""
-                INSERT INTO {SLICES_TABLE} (time, instrument, t_from_deal, ask_px_0, bid_px_0, usd_ask_px_0, usd_bid_px_0)
+                INSERT INTO {SLICES_TABLE} (time, instrument, t_from_deal, ask_px_0, bid_px_0, usd_ask_px_0, usd_bid_px_0, ret, pnl_usd)
                 SELECT
-                    '{deal_time}',
-                    '{instrument}',
-                    CAST(DATEDIFF('s', '{deal_time}', p.ts) AS INT),
-                    p.ask_px_0,
-                    p.bid_px_0,
-                    p.ask_px_0 * u.ask_px_0,
-                    p.bid_px_0 * u.bid_px_0
-                FROM {PRICES_TABLE} p
-                JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
-                WHERE p.instrument = '{instrument}'
-                  AND p.ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
-                               AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
+                    CAST('{deal_time}' AS TIMESTAMP) time,
+                    CAST('{instrument}' AS SYMBOL) instrument,
+                    CAST(DATEDIFF('s', '{deal_time}', ts) AS INT) t_from_deal,
+                    ask_px_0 ask_px_0,
+                    bid_px_0 bid_px_0,
+                    ask_px_0 usd_ask_px_0,
+                    bid_px_0 usd_bid_px_0,
+                    ({deal_px} - ask_px_0) / {deal_px} ret,
+                    {entry_usd} - ask_px_0 * {deal_amt} pnl_usd
+                FROM {PRICES_TABLE}
+                WHERE instrument = '{instrument}'
+                  AND ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
+                             AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
             """
+    else:
+        usd_instrument, is_inverted = usd_info
+        # Need to fetch entry_usd_px at deal time for pnl calculation
+        # For now, use a simpler approach: compute pnl_usd inline without subquery
+        # entry_usd = deal_px * deal_amt * usd_rate_at_deal_time
+        # We'll compute this with a CROSS JOIN to get the deal-time USD rate
+        if is_inverted:
+            # Inverted: usd_ask = price / usd_bid, usd_bid = price / usd_ask
+            if deal_side == 'BUY':
+                sql = f"""
+                    INSERT INTO {SLICES_TABLE} (time, instrument, t_from_deal, ask_px_0, bid_px_0, usd_ask_px_0, usd_bid_px_0, ret, pnl_usd)
+                    SELECT
+                        CAST('{deal_time}' AS TIMESTAMP) time,
+                        CAST('{instrument}' AS SYMBOL) instrument,
+                        CAST(DATEDIFF('s', '{deal_time}', p.ts) AS INT) t_from_deal,
+                        p.ask_px_0 ask_px_0,
+                        p.bid_px_0 bid_px_0,
+                        p.ask_px_0 / u.bid_px_0 usd_ask_px_0,
+                        p.bid_px_0 / u.ask_px_0 usd_bid_px_0,
+                        (p.bid_px_0 - {deal_px}) / {deal_px} ret,
+                        p.bid_px_0 * {deal_amt} * (p.bid_px_0 / u.ask_px_0) - {deal_px} * {deal_amt} * (e.ask_px_0 / eu.bid_px_0) pnl_usd
+                    FROM {PRICES_TABLE} p
+                    JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
+                    CROSS JOIN {PRICES_TABLE} e
+                    CROSS JOIN {PRICES_TABLE} eu
+                    WHERE p.instrument = '{instrument}'
+                      AND p.ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
+                                   AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
+                      AND e.instrument = '{instrument}' AND e.ts = '{deal_time}'
+                      AND eu.instrument = '{usd_instrument}' AND eu.ts = '{deal_time}'
+                """
+            else:
+                sql = f"""
+                    INSERT INTO {SLICES_TABLE} (time, instrument, t_from_deal, ask_px_0, bid_px_0, usd_ask_px_0, usd_bid_px_0, ret, pnl_usd)
+                    SELECT
+                        CAST('{deal_time}' AS TIMESTAMP) time,
+                        CAST('{instrument}' AS SYMBOL) instrument,
+                        CAST(DATEDIFF('s', '{deal_time}', p.ts) AS INT) t_from_deal,
+                        p.ask_px_0 ask_px_0,
+                        p.bid_px_0 bid_px_0,
+                        p.ask_px_0 / u.bid_px_0 usd_ask_px_0,
+                        p.bid_px_0 / u.ask_px_0 usd_bid_px_0,
+                        ({deal_px} - p.ask_px_0) / {deal_px} ret,
+                        {deal_px} * {deal_amt} * (e.ask_px_0 / eu.bid_px_0) - p.ask_px_0 * {deal_amt} * (p.ask_px_0 / u.bid_px_0) pnl_usd
+                    FROM {PRICES_TABLE} p
+                    JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
+                    CROSS JOIN {PRICES_TABLE} e
+                    CROSS JOIN {PRICES_TABLE} eu
+                    WHERE p.instrument = '{instrument}'
+                      AND p.ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
+                                   AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
+                      AND e.instrument = '{instrument}' AND e.ts = '{deal_time}'
+                      AND eu.instrument = '{usd_instrument}' AND eu.ts = '{deal_time}'
+                """
+        else:
+            # Normal: usd_ask = price * usd_ask, usd_bid = price * usd_bid
+            if deal_side == 'BUY':
+                sql = f"""
+                    INSERT INTO {SLICES_TABLE} (time, instrument, t_from_deal, ask_px_0, bid_px_0, usd_ask_px_0, usd_bid_px_0, ret, pnl_usd)
+                    SELECT
+                        CAST('{deal_time}' AS TIMESTAMP) time,
+                        CAST('{instrument}' AS SYMBOL) instrument,
+                        CAST(DATEDIFF('s', '{deal_time}', p.ts) AS INT) t_from_deal,
+                        p.ask_px_0 ask_px_0,
+                        p.bid_px_0 bid_px_0,
+                        p.ask_px_0 * u.ask_px_0 usd_ask_px_0,
+                        p.bid_px_0 * u.bid_px_0 usd_bid_px_0,
+                        (p.bid_px_0 - {deal_px}) / {deal_px} ret,
+                        p.bid_px_0 * {deal_amt} * (p.bid_px_0 * u.bid_px_0) - {deal_px} * {deal_amt} * (e.ask_px_0 * eu.ask_px_0) pnl_usd
+                    FROM {PRICES_TABLE} p
+                    JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
+                    CROSS JOIN {PRICES_TABLE} e
+                    CROSS JOIN {PRICES_TABLE} eu
+                    WHERE p.instrument = '{instrument}'
+                      AND p.ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
+                                   AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
+                      AND e.instrument = '{instrument}' AND e.ts = '{deal_time}'
+                      AND eu.instrument = '{usd_instrument}' AND eu.ts = '{deal_time}'
+                """
+            else:
+                sql = f"""
+                    INSERT INTO {SLICES_TABLE} (time, instrument, t_from_deal, ask_px_0, bid_px_0, usd_ask_px_0, usd_bid_px_0, ret, pnl_usd)
+                    SELECT
+                        CAST('{deal_time}' AS TIMESTAMP) time,
+                        CAST('{instrument}' AS SYMBOL) instrument,
+                        CAST(DATEDIFF('s', '{deal_time}', p.ts) AS INT) t_from_deal,
+                        p.ask_px_0 ask_px_0,
+                        p.bid_px_0 bid_px_0,
+                        p.ask_px_0 * u.ask_px_0 usd_ask_px_0,
+                        p.bid_px_0 * u.bid_px_0 usd_bid_px_0,
+                        ({deal_px} - p.ask_px_0) / {deal_px} ret,
+                        {deal_px} * {deal_amt} * (e.ask_px_0 * eu.ask_px_0) - p.ask_px_0 * {deal_amt} * (p.ask_px_0 * u.ask_px_0) pnl_usd
+                    FROM {PRICES_TABLE} p
+                    JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
+                    CROSS JOIN {PRICES_TABLE} e
+                    CROSS JOIN {PRICES_TABLE} eu
+                    WHERE p.instrument = '{instrument}'
+                      AND p.ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
+                                   AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
+                      AND e.instrument = '{instrument}' AND e.ts = '{deal_time}'
+                      AND eu.instrument = '{usd_instrument}' AND eu.ts = '{deal_time}'
+                """
 
     cur.execute(sql)
 

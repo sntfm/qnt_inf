@@ -1,4 +1,4 @@
-CREATE TABLE mart_{}_latency (
+CREATE TABLE mart_kraken_latency (
     ts TIMESTAMP,
     date SYMBOL,
     hour INT,
@@ -6,7 +6,7 @@ CREATE TABLE mart_{}_latency (
     bin_count LONG
 ) TIMESTAMP(ts) PARTITION BY MONTH;
 
-CREATE TABLE mart_{}_latency_stats (
+CREATE TABLE mart_kraken_latency_stats (
     ts TIMESTAMP,
     date SYMBOL,
     mean_ms DOUBLE,
@@ -24,17 +24,19 @@ CREATE TABLE IF NOT EXISTS convmap_usd (
 
 -- Deals slices table: for each deal, stores price snapshots within lookup_window
 -- t_from_deal is seconds offset from deal time (negative = before, 0 = at deal, positive = after)
-CREATE TABLE mart_{}_decay_slices (
+CREATE TABLE mart_kraken_decay_slices (
     time TIMESTAMP,             -- time of the deal
     instrument SYMBOL,               -- deal instrument
     t_from_deal INT,                 -- seconds offset from deal time
     ask_px_0 DOUBLE,                 -- ask price at this time
     bid_px_0 DOUBLE,                 -- bid price at this time
     usd_ask_px_0 DOUBLE,             -- USD conversion ask price (if applicable)
-    usd_bid_px_0 DOUBLE               -- USD conversion bid price (if applicable)
-) TIMESTAMP(deal_time) PARTITION BY MONTH;
+    usd_bid_px_0 DOUBLE,             -- USD conversion bid price (if applicable)
+    ret DOUBLE,                   -- return: BUY=(bid-entry)/entry, SELL=(entry-ask)/entry
+    pnl_usd DOUBLE                   -- PnL in USD: BUY=bid*amt*usd_bid - entry_usd, SELL=entry_usd - ask*amt*usd_ask
+) TIMESTAMP(time) PARTITION BY MONTH;
 
-CREATE TABLE mart_{}_decay_deals (
+CREATE TABLE mart_kraken_decay_deals (
     time TIMESTAMP,
     instrument SYMBOL,
     side SYMBOL,
