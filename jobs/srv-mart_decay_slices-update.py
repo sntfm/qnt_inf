@@ -224,6 +224,25 @@ def _process_deal(cur, deal, convmap: dict):
 
     cur.execute(sql)
 
+    # Update amt_usd in mart_decay_deals: amt * (usd_ask_px_0 + usd_bid_px_0) / 2 at t_from_deal = 0
+    # QuestDB doesn't support subqueries in UPDATE, so fetch first then update
+    fetch_sql = f"""
+        SELECT (usd_ask_px_0 + usd_bid_px_0) / 2 AS mid_usd
+        FROM {SLICES_TABLE}
+        WHERE time = '{deal_time}' AND instrument = '{instrument}' AND t_from_deal = 0
+    """
+    cur.execute(fetch_sql)
+    row = cur.fetchone()
+    if row and row[0] is not None:
+        mid_usd = row[0]
+        amt_usd = deal_amt * mid_usd
+        update_sql = f"""
+            UPDATE {DEALS_TABLE}
+            SET amt_usd = {amt_usd}
+            WHERE time = '{deal_time}' AND instrument = '{instrument}'
+        """
+        cur.execute(update_sql)
+
 
 def _update(date_str: str):
     """Process all deals for a given date."""
@@ -244,8 +263,9 @@ def _update(date_str: str):
                 if (idx + 1) % 100 == 0:
                     conn.commit()
                     print(f"Processed {idx + 1}/{len(deals)} deals")
-
+            print(f"Processed {len(deals)%100}/{len(deals)} deals")
             conn.commit()
+
 
     print(f"Done processing {date_str}")
 
