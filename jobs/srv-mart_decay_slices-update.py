@@ -174,7 +174,7 @@ def _process_deal(cur, deal, convmap: dict):
                         p.ask_px_0 / u.bid_px_0 usd_ask_px_0,
                         p.bid_px_0 / u.ask_px_0 usd_bid_px_0,
                         (p.bid_px_0 - {deal_px}) / {deal_px} ret,
-                        p.bid_px_0 * {deal_amt} * (p.bid_px_0 / u.ask_px_0) - {entry_usd} pnl_usd
+                        {deal_amt} * (p.bid_px_0 / u.ask_px_0) - {entry_usd} pnl_usd
                     FROM {PRICES_TABLE} p
                     JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
                     WHERE p.instrument = '{instrument}'
@@ -193,7 +193,7 @@ def _process_deal(cur, deal, convmap: dict):
                         p.ask_px_0 / u.bid_px_0 usd_ask_px_0,
                         p.bid_px_0 / u.ask_px_0 usd_bid_px_0,
                         ({deal_px} - p.ask_px_0) / {deal_px} ret,
-                        {entry_usd} - p.ask_px_0 * {deal_amt} * (p.ask_px_0 / u.bid_px_0) pnl_usd
+                        {entry_usd} - {deal_amt} * (p.ask_px_0 / u.bid_px_0) pnl_usd
                     FROM {PRICES_TABLE} p
                     JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
                     WHERE p.instrument = '{instrument}'
@@ -213,7 +213,7 @@ def _process_deal(cur, deal, convmap: dict):
                         p.ask_px_0 * u.ask_px_0 usd_ask_px_0,
                         p.bid_px_0 * u.bid_px_0 usd_bid_px_0,
                         (p.bid_px_0 - {deal_px}) / {deal_px} ret,
-                        p.bid_px_0 * {deal_amt} * (p.bid_px_0 * u.bid_px_0) - {entry_usd} pnl_usd
+                        {deal_amt} * (p.bid_px_0 * u.bid_px_0) - {entry_usd} pnl_usd
                     FROM {PRICES_TABLE} p
                     JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
                     WHERE p.instrument = '{instrument}'
@@ -232,7 +232,7 @@ def _process_deal(cur, deal, convmap: dict):
                         p.ask_px_0 * u.ask_px_0 usd_ask_px_0,
                         p.bid_px_0 * u.bid_px_0 usd_bid_px_0,
                         ({deal_px} - p.ask_px_0) / {deal_px} ret,
-                        {entry_usd} - p.ask_px_0 * {deal_amt} * (p.ask_px_0 * u.ask_px_0) pnl_usd
+                        {entry_usd} - {deal_amt} * (p.ask_px_0 * u.ask_px_0) pnl_usd
                     FROM {PRICES_TABLE} p
                     JOIN {PRICES_TABLE} u ON u.ts = p.ts AND u.instrument = '{usd_instrument}'
                     WHERE p.instrument = '{instrument}'
