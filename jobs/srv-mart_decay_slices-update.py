@@ -106,16 +106,16 @@ def _process_deal(cur, deal, convmap: dict):
                 SELECT
                     CAST('{deal_time}' AS TIMESTAMP) time,
                     CAST('{instrument}' AS SYMBOL) instrument,
-                    CAST(DATEDIFF('s', '{deal_time}', ts) AS INT) t_from_deal,
-                    ask_px_0 ask_px_0,
-                    bid_px_0 bid_px_0,
-                    ask_px_0 usd_ask_px_0,
-                    bid_px_0 usd_bid_px_0,
-                    (bid_px_0 - {deal_px}) / {deal_px} ret,
-                    bid_px_0 * {deal_amt} - {entry_usd} pnl_usd
-                FROM {PRICES_TABLE}
-                WHERE instrument = '{instrument}'
-                  AND ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
+                    CAST(extract(epoch from p.ts) - extract(epoch from CAST('{deal_time}' AS TIMESTAMP)) AS INT) t_from_deal,
+                    p.ask_px_0 ask_px_0,
+                    p.bid_px_0 bid_px_0,
+                    p.ask_px_0 usd_ask_px_0,
+                    p.bid_px_0 usd_bid_px_0,
+                    (p.bid_px_0 - {deal_px}) / {deal_px} ret,
+                    p.bid_px_0 * {deal_amt} - {entry_usd} pnl_usd
+                FROM {PRICES_TABLE} p
+                WHERE p.instrument = '{instrument}'
+                  AND p.ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
                              AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
             """
         else:
@@ -124,16 +124,16 @@ def _process_deal(cur, deal, convmap: dict):
                 SELECT
                     CAST('{deal_time}' AS TIMESTAMP) time,
                     CAST('{instrument}' AS SYMBOL) instrument,
-                    CAST(DATEDIFF('s', '{deal_time}', ts) AS INT) t_from_deal,
-                    ask_px_0 ask_px_0,
-                    bid_px_0 bid_px_0,
-                    ask_px_0 usd_ask_px_0,
-                    bid_px_0 usd_bid_px_0,
-                    ({deal_px} - ask_px_0) / {deal_px} ret,
-                    {entry_usd} - ask_px_0 * {deal_amt} pnl_usd
-                FROM {PRICES_TABLE}
-                WHERE instrument = '{instrument}'
-                  AND ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
+                    CAST(extract(epoch from p.ts) - extract(epoch from CAST('{deal_time}' AS TIMESTAMP)) AS INT) t_from_deal,
+                    p.ask_px_0 ask_px_0,
+                    p.bid_px_0 bid_px_0,
+                    p.ask_px_0 usd_ask_px_0,
+                    p.bid_px_0 usd_bid_px_0,
+                    ({deal_px} - p.ask_px_0) / {deal_px} ret,
+                    {entry_usd} - p.ask_px_0 * {deal_amt} pnl_usd
+                FROM {PRICES_TABLE} p
+                WHERE p.instrument = '{instrument}'
+                  AND p.ts BETWEEN DATEADD('m', -{FRAME_MINS}, '{deal_time}')
                              AND DATEADD('m', {FRAME_MINS}, '{deal_time}')
             """
     else:
@@ -168,7 +168,7 @@ def _process_deal(cur, deal, convmap: dict):
                     SELECT
                         CAST('{deal_time}' AS TIMESTAMP) time,
                         CAST('{instrument}' AS SYMBOL) instrument,
-                        CAST(DATEDIFF('s', '{deal_time}', p.ts) AS INT) t_from_deal,
+                        CAST(extract(epoch from p.ts) - extract(epoch from CAST('{deal_time}' AS TIMESTAMP)) AS INT) t_from_deal,
                         p.ask_px_0 ask_px_0,
                         p.bid_px_0 bid_px_0,
                         p.ask_px_0 / u.bid_px_0 usd_ask_px_0,
@@ -187,7 +187,7 @@ def _process_deal(cur, deal, convmap: dict):
                     SELECT
                         CAST('{deal_time}' AS TIMESTAMP) time,
                         CAST('{instrument}' AS SYMBOL) instrument,
-                        CAST(DATEDIFF('s', '{deal_time}', p.ts) AS INT) t_from_deal,
+                        CAST(extract(epoch from p.ts) - extract(epoch from CAST('{deal_time}' AS TIMESTAMP)) AS INT) t_from_deal,
                         p.ask_px_0 ask_px_0,
                         p.bid_px_0 bid_px_0,
                         p.ask_px_0 / u.bid_px_0 usd_ask_px_0,
@@ -207,7 +207,7 @@ def _process_deal(cur, deal, convmap: dict):
                     SELECT
                         CAST('{deal_time}' AS TIMESTAMP) time,
                         CAST('{instrument}' AS SYMBOL) instrument,
-                        CAST(DATEDIFF('s', '{deal_time}', p.ts) AS INT) t_from_deal,
+                        CAST(extract(epoch from p.ts) - extract(epoch from CAST('{deal_time}' AS TIMESTAMP)) AS INT) t_from_deal,
                         p.ask_px_0 ask_px_0,
                         p.bid_px_0 bid_px_0,
                         p.ask_px_0 * u.ask_px_0 usd_ask_px_0,
@@ -226,7 +226,7 @@ def _process_deal(cur, deal, convmap: dict):
                     SELECT
                         CAST('{deal_time}' AS TIMESTAMP) time,
                         CAST('{instrument}' AS SYMBOL) instrument,
-                        CAST(DATEDIFF('s', '{deal_time}', p.ts) AS INT) t_from_deal,
+                        CAST(extract(epoch from p.ts) - extract(epoch from CAST('{deal_time}' AS TIMESTAMP)) AS INT) t_from_deal,
                         p.ask_px_0 ask_px_0,
                         p.bid_px_0 bid_px_0,
                         p.ask_px_0 * u.ask_px_0 usd_ask_px_0,
@@ -306,4 +306,5 @@ if __name__ == "__main__":
                     "2025-10-23", "2025-10-24", "2025-10-25",
                     "2025-10-26", "2025-10-27", "2025-10-28",
                     "2025-10-29", "2025-10-30"]:
+    # for date_str in ["2025-10-20"]:
         _update(date_str)
