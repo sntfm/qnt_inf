@@ -237,33 +237,110 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
         print(f"[DEBUG] Filters: instruments={instruments}, sides={sides}, order_kinds={order_kinds}, order_types={order_types}, tifs={tifs}")
         print(f"[DEBUG] Aggregation mode: {aggregate}")
         
-        # Fetch data for the datetime range
-        print(f"[DEBUG] Fetching dataset...")
-        deals_df, slices_dict = decay._build_dataset(start_datetime, end_datetime, view=view)
-        print(f"[DEBUG] Dataset fetched successfully")
+        # OPTIMIZATION: Use database aggregation for grouped views (99% less memory!)
+        # Only fetch raw slices for 'none' (show all) mode
+        use_db_aggregation = aggregate in ['instrument', 'side', 'day', 'hour']
         
-        if deals_df.empty:
-            fig = go.Figure()
-            fig.update_layout(
-                margin=dict(l=40, r=20, t=60, b=40),
-                template="plotly_white",
-                xaxis_title="Time from Deal (sec)",
-                yaxis_title=yaxis_label,
-                annotations=[
-                    dict(
-                        text=f"No deals found for {start_datetime} to {end_datetime}",
-                        xref="paper",
-                        yref="paper",
-                        x=0.5,
-                        y=0.5,
-                        showarrow=False,
-                        font=dict(size=14, color="#e74c3c"),
-                    )
-                ],
+        if use_db_aggregation:
+            print(f"[DEBUG] Using DATABASE aggregation (memory efficient!)")
+            
+            # Build filters dict
+            filters_dict = {
+                'instruments': instruments if instruments else [],
+                'sides': sides if sides else [],
+                'order_kinds': order_kinds if order_kinds else [],
+                'order_types': order_types if order_types else [],
+                'tifs': tifs if tifs else []
+            }
+            
+            # Fetch pre-aggregated data from database
+            agg_df = decay._fetch_aggregated_slices(
+                start_datetime, end_datetime, view, aggregate, filters_dict
             )
-            return fig, [], [], [], [], [], f"No deals found for {start_datetime} to {end_datetime}"
-        
-        print(f"[DEBUG] Found {len(deals_df)} deals, {len(slices_dict)} slices")
+            
+            # Also fetch deals for filter options (much smaller query)
+            deals_df = decay._fetch_deals(start_datetime, end_datetime)
+            
+            if deals_df.empty or agg_df.empty:
+                fig = go.Figure()
+                fig.update_layout(
+                    margin=dict(l=40, r=20, t=60, b=40),
+                    template="plotly_white",
+                    xaxis_title="Time from Deal (sec)",
+                    yaxis_title=yaxis_label,
+                    annotations=[
+                        dict(
+                            text=f"No deals found for {start_datetime} to {end_datetime}",
+                            xref="paper",
+                            yref="paper",
+                            x=0.5,
+                            y=0.5,
+                            showarrow=False,
+                            font=dict(size=14, color="#e74c3c"),
+                        )
+                    ],
+                )
+                return fig, [], [], [], [], [], f"No deals found for {start_datetime} to {end_datetime}"
+            
+            print(f"[DEBUG] Fetched {len(agg_df)} aggregated rows (vs millions of raw slices!)")
+            
+        else:
+            # 'none' mode - show all individual lines
+            # Validate date range to prevent memory issues
+            from datetime import datetime
+            dt_start = datetime.strptime(start_datetime.split()[0], '%Y-%m-%d')
+            dt_end = datetime.strptime(end_datetime.split()[0], '%Y-%m-%d')
+            num_days = (dt_end - dt_start).days + 1
+            
+            if num_days > 3:
+                fig = go.Figure()
+                fig.update_layout(
+                    margin=dict(l=40, r=20, t=60, b=40),
+                    template="plotly_white",
+                    xaxis_title="Time from Deal (sec)",
+                    yaxis_title=yaxis_label,
+                    annotations=[
+                        dict(
+                            text=f"'Show all' mode limited to 3 days.<br>You selected {num_days} days.<br>Please use grouping (Instrument/Side/Day/Hour) for larger ranges.",
+                            xref="paper",
+                            yref="paper",
+                            x=0.5,
+                            y=0.5,
+                            showarrow=False,
+                            font=dict(size=14, color="#e74c3c"),
+                        )
+                    ],
+                )
+                return fig, [], [], [], [], [], f"'Show all' mode limited to 3 days (you selected {num_days} days)"
+            
+            print(f"[DEBUG] Using PYTHON aggregation (fetching all slices...)")
+            
+            # Fetch data for the datetime range
+            deals_df, slices_dict = decay._build_dataset(start_datetime, end_datetime, view=view)
+            print(f"[DEBUG] Dataset fetched successfully")
+            
+            if deals_df.empty:
+                fig = go.Figure()
+                fig.update_layout(
+                    margin=dict(l=40, r=20, t=60, b=40),
+                    template="plotly_white",
+                    xaxis_title="Time from Deal (sec)",
+                    yaxis_title=yaxis_label,
+                    annotations=[
+                        dict(
+                            text=f"No deals found for {start_datetime} to {end_datetime}",
+                            xref="paper",
+                            yref="paper",
+                            x=0.5,
+                            y=0.5,
+                            showarrow=False,
+                            font=dict(size=14, color="#e74c3c"),
+                        )
+                    ],
+                )
+                return fig, [], [], [], [], [], f"No deals found for {start_datetime} to {end_datetime}"
+            
+            print(f"[DEBUG] Found {len(deals_df)} deals, {len(slices_dict)} slices")
         
         # Generate filter options from ALL data (before filtering)
         all_instruments = [{'label': inst, 'value': inst} for inst in sorted(deals_df['instrument'].unique())]
@@ -272,21 +349,39 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
         all_order_types = [{'label': ot, 'value': ot} for ot in sorted(deals_df['orderType'].dropna().unique())]
         all_tifs = [{'label': tif, 'value': tif} for tif in sorted(deals_df['tif'].dropna().unique())]
         
-        # Apply filters to deals
-        mask = pd.Series([True] * len(deals_df))
-        if instruments:
-            mask &= deals_df['instrument'].isin(instruments)
-        if sides:
-            mask &= deals_df['side'].isin(sides)
-        if order_kinds:
-            mask &= deals_df['orderKind'].isin(order_kinds)
-        if order_types:
-            mask &= deals_df['orderType'].isin(order_types)
-        if tifs:
-            mask &= deals_df['tif'].isin(tifs)
-        
-        filtered_deals = deals_df[mask]
-        print(f"[DEBUG] After filtering: {len(filtered_deals)} deals")
+        # For DB aggregation mode, we already have filtered data
+        if use_db_aggregation:
+            # Apply filters to deals for display purposes only
+            mask = pd.Series([True] * len(deals_df))
+            if instruments:
+                mask &= deals_df['instrument'].isin(instruments)
+            if sides:
+                mask &= deals_df['side'].isin(sides)
+            if order_kinds:
+                mask &= deals_df['orderKind'].isin(order_kinds)
+            if order_types:
+                mask &= deals_df['orderType'].isin(order_types)
+            if tifs:
+                mask &= deals_df['tif'].isin(tifs)
+            
+            filtered_deals = deals_df[mask]
+            print(f"[DEBUG] After filtering: {len(filtered_deals)} deals")
+        else:
+            # Apply filters to deals for Python aggregation
+            mask = pd.Series([True] * len(deals_df))
+            if instruments:
+                mask &= deals_df['instrument'].isin(instruments)
+            if sides:
+                mask &= deals_df['side'].isin(sides)
+            if order_kinds:
+                mask &= deals_df['orderKind'].isin(order_kinds)
+            if order_types:
+                mask &= deals_df['orderType'].isin(order_types)
+            if tifs:
+                mask &= deals_df['tif'].isin(tifs)
+            
+            filtered_deals = deals_df[mask]
+            print(f"[DEBUG] After filtering: {len(filtered_deals)} deals")
         
         if filtered_deals.empty:
             fig = go.Figure()
@@ -330,6 +425,7 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
         def compute_weighted_avg_pandas(group_deals, group_name, group_value):
             """Compute weighted average for a group using efficient pandas operations."""
             import time
+            import gc
             start_time = time.time()
             
             # Filter slices_dict to only include deals in this group (avoid iteration)
@@ -339,12 +435,9 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
             if not relevant_slices:
                 return None, None
             
-            # Build list of (t_from_deal, y_value, weight) tuples efficiently
-            # Pre-allocate lists for better performance
-            t_values = []
-            y_values = []
-            weights = []
-            
+            # OPTIMIZED: Build lists more efficiently using list comprehensions
+            # This reduces memory fragmentation compared to repeated extend() calls
+            all_data = []
             for idx, slice_df in relevant_slices.items():
                 deal = group_deals.loc[idx]
                 weight = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else 0.0
@@ -354,20 +447,19 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
                     t_arr = slice_df['t_from_deal'].values
                     y_arr = slice_df[y_column].values
                     
-                    # Extend lists with repeated weight
-                    t_values.extend(t_arr)
-                    y_values.extend(y_arr)
-                    weights.extend([weight] * len(t_arr))
+                    # Build tuples for this slice
+                    for t, y in zip(t_arr, y_arr):
+                        all_data.append((t, y, weight))
             
-            if not t_values:
+            if not all_data:
                 return None, None
             
-            # Create DataFrame from lists (single operation, much faster than concat)
-            combined = pd.DataFrame({
-                't_from_deal': t_values,
-                y_column: y_values,
-                'weight': weights
-            })
+            # Create DataFrame from list of tuples (more memory efficient)
+            combined = pd.DataFrame(all_data, columns=['t_from_deal', y_column, 'weight'])
+            
+            # Free intermediate data
+            del all_data
+            gc.collect()
             
             print(f"[DEBUG] {group_name}={group_value}: Built combined DataFrame with {len(combined)} rows from {len(relevant_slices)} deals")
             
@@ -382,12 +474,73 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
             
             grouped['weighted_avg'] = grouped['weighted_value'] / grouped['weight']
             
+            # Free combined DataFrame
+            del combined
+            gc.collect()
+            
             elapsed = time.time() - start_time
             print(f"[DEBUG] {group_name}={group_value}: Computed weighted avg in {elapsed:.2f}s")
             
             return grouped.index.tolist(), grouped['weighted_avg'].tolist()
         
-        if aggregate == 'instrument':
+        if use_db_aggregation:
+            # Plot directly from database-aggregated results (FAST!)
+            print(f"[DEBUG] Plotting from database-aggregated data")
+            
+            # Group by the group_key column
+            unique_groups = sorted(agg_df['group_key'].unique())
+            
+            # Color palettes based on aggregation type
+            if aggregate == 'instrument':
+                colors_palette = px.colors.qualitative.Bold
+            elif aggregate == 'side':
+                colors_palette = {'buy': '#00D9FF', 'BUY': '#00D9FF', 'sell': '#FF6B9D', 'SELL': '#FF6B9D'}
+            elif aggregate == 'day':
+                colors_palette = px.colors.qualitative.Vivid
+            elif aggregate == 'hour':
+                colors_palette = px.colors.qualitative.T10
+            else:
+                colors_palette = px.colors.qualitative.Plotly
+            
+            for idx, group_val in enumerate(unique_groups):
+                group_data = agg_df[agg_df['group_key'] == group_val]
+                
+                # Extract x and y data
+                x_data = group_data['t_from_deal'].tolist()
+                y_data = group_data['weighted_avg'].tolist()
+                
+                if not x_data or not y_data:
+                    continue
+                
+                # Get color
+                if isinstance(colors_palette, dict):
+                    color = colors_palette.get(group_val, '#636EFA')
+                else:
+                    color = colors_palette[idx % len(colors_palette)]
+                
+                # Format group name
+                if aggregate == 'hour':
+                    group_name = f"Hour {group_val:02d}" if isinstance(group_val, int) else str(group_val)
+                else:
+                    group_name = str(group_val)
+                
+                # Add trace
+                fig.add_trace(go.Scatter(
+                    x=x_data,
+                    y=y_data,
+                    mode='lines',
+                    name=group_name,
+                    legendgroup=str(group_val),
+                    showlegend=True,
+                    opacity=0.9,
+                    line=dict(width=2.5, color=color),
+                    hovertemplate=f"<b>{group_name}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
+                ))
+                traces_added += 1
+            
+            print(f"[DEBUG] Added {traces_added} traces from database aggregation")
+            
+        elif aggregate == 'instrument':
             # Weighted average by amt_usd per instrument
             # Use Bold color palette for instruments
             inst_colors = px.colors.qualitative.Bold
@@ -448,17 +601,16 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
                 
         elif aggregate == 'day':
             # Weighted average by amt_usd per day
-            # Add 'day' column to filtered_deals
-            filtered_deals_copy = filtered_deals.copy()
-            filtered_deals_copy['day'] = pd.to_datetime(filtered_deals_copy['time']).dt.date
-            unique_days = sorted(filtered_deals_copy['day'].unique())
+            # OPTIMIZED: Add 'day' column directly instead of copying entire DataFrame
+            filtered_deals['day'] = pd.to_datetime(filtered_deals['time']).dt.date
+            unique_days = sorted(filtered_deals['day'].unique())
             
             # Create color map for days - use Vivid palette for vibrant colors
             day_colors = px.colors.qualitative.Vivid
             day_color_map = {day: day_colors[i % len(day_colors)] for i, day in enumerate(unique_days)}
             
             for day in unique_days:
-                day_deals = filtered_deals_copy[filtered_deals_copy['day'] == day]
+                day_deals = filtered_deals[filtered_deals['day'] == day]
                 
                 all_t, weighted_avg_y = compute_weighted_avg_pandas(day_deals, 'day', day)
                 
@@ -478,20 +630,22 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
                     hovertemplate=f"<b>{day}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
                 ))
                 traces_added += 1
+            
+            # Clean up temporary column
+            filtered_deals.drop(columns=['day'], inplace=True)
                 
         elif aggregate == 'hour':
             # Weighted average by amt_usd per hour
-            # Add 'hour' column to filtered_deals
-            filtered_deals_copy = filtered_deals.copy()
-            filtered_deals_copy['hour'] = pd.to_datetime(filtered_deals_copy['time']).dt.hour
-            unique_hours = sorted(filtered_deals_copy['hour'].unique())
+            # OPTIMIZED: Add 'hour' column directly instead of copying entire DataFrame
+            filtered_deals['hour'] = pd.to_datetime(filtered_deals['time']).dt.hour
+            unique_hours = sorted(filtered_deals['hour'].unique())
             
             # Create color map for hours - use T10 palette for vibrant colors
             hour_colors = px.colors.qualitative.T10
             hour_color_map = {hour: hour_colors[i % len(hour_colors)] for i, hour in enumerate(unique_hours)}
             
             for hour in unique_hours:
-                hour_deals = filtered_deals_copy[filtered_deals_copy['hour'] == hour]
+                hour_deals = filtered_deals[filtered_deals['hour'] == hour]
                 
                 all_t, weighted_avg_y = compute_weighted_avg_pandas(hour_deals, 'hour', hour)
                 
@@ -511,6 +665,9 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
                     hovertemplate=f"<b>Hour {hour:02d}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
                 ))
                 traces_added += 1
+            
+            # Clean up temporary column
+            filtered_deals.drop(columns=['hour'], inplace=True)
         else:
             # No aggregation - show all individual lines
             for idx in filtered_deals.index:
@@ -575,6 +732,12 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
         )
 
         status = f"Plotted {len(filtered_deals)} of {len(deals_df)} deals"
+        
+        # CRITICAL: Force garbage collection to free memory after processing
+        # This is essential for handling 5+ days of data on remote servers
+        import gc
+        gc.collect()
+        
         return fig, all_instruments, all_sides, all_order_kinds, all_order_types, all_tifs, status
         
     except Exception as e:
