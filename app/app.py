@@ -332,47 +332,55 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
             import time
             start_time = time.time()
             
-            # Collect all slices for this group
-            all_slices = []
+            # Filter slices_dict to only include deals in this group (avoid iteration)
+            group_indices = set(group_deals.index)
+            relevant_slices = {idx: slices_dict[idx] for idx in group_indices if idx in slices_dict and not slices_dict[idx].empty}
             
-            for idx in group_deals.index:
-                if idx not in slices_dict:
-                    continue
-                
-                slice_df = slices_dict[idx]
-                if slice_df.empty:
-                    continue
-                
+            if not relevant_slices:
+                return None, None
+            
+            # Build list of (t_from_deal, y_value, weight) tuples efficiently
+            # Pre-allocate lists for better performance
+            t_values = []
+            y_values = []
+            weights = []
+            
+            for idx, slice_df in relevant_slices.items():
                 deal = group_deals.loc[idx]
                 weight = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else 0.0
                 
                 if weight > 0:
-                    # Add weight and group identifier to slice
-                    slice_copy = slice_df[['t_from_deal', y_column]].copy()
-                    slice_copy['weight'] = weight
-                    slice_copy['deal_idx'] = idx
-                    all_slices.append(slice_copy)
+                    # Extract arrays directly (faster than copying DataFrame)
+                    t_arr = slice_df['t_from_deal'].values
+                    y_arr = slice_df[y_column].values
+                    
+                    # Extend lists with repeated weight
+                    t_values.extend(t_arr)
+                    y_values.extend(y_arr)
+                    weights.extend([weight] * len(t_arr))
             
-            if not all_slices:
+            if not t_values:
                 return None, None
             
-            # Combine all slices into single DataFrame
-            combined = pd.concat(all_slices, ignore_index=True)
-            print(f"[DEBUG] {group_name}={group_value}: Combined {len(all_slices)} slices into {len(combined)} rows")
+            # Create DataFrame from lists (single operation, much faster than concat)
+            combined = pd.DataFrame({
+                't_from_deal': t_values,
+                y_column: y_values,
+                'weight': weights
+            })
+            
+            print(f"[DEBUG] {group_name}={group_value}: Built combined DataFrame with {len(combined)} rows from {len(relevant_slices)} deals")
             
             # Compute weighted average at each t_from_deal using pandas groupby
             # Formula: weighted_avg = sum(value * weight) / sum(weight)
             combined['weighted_value'] = combined[y_column] * combined['weight']
             
-            grouped = combined.groupby('t_from_deal').agg({
+            grouped = combined.groupby('t_from_deal', sort=True).agg({
                 'weighted_value': 'sum',
                 'weight': 'sum'
             })
             
             grouped['weighted_avg'] = grouped['weighted_value'] / grouped['weight']
-            
-            # Sort by t_from_deal
-            grouped = grouped.sort_index()
             
             elapsed = time.time() - start_time
             print(f"[DEBUG] {group_name}={group_value}: Computed weighted avg in {elapsed:.2f}s")
