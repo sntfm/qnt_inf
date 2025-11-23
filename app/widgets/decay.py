@@ -126,8 +126,14 @@ def _fetch_deals(start_datetime: str, end_datetime: str) -> pd.DataFrame:
     return df
 
 
-def _fetch_slices(start_datetime: str, end_datetime: str) -> pd.DataFrame:
-    """Fetch all precomputed slices for a given datetime range."""
+def _fetch_slices(start_datetime: str, end_datetime: str, view: str = 'return') -> pd.DataFrame:
+    """
+    Fetch slices for a given datetime range.
+    
+    OPTIMIZED: Only fetches columns needed for the view (56% less data!)
+    - Before: 9 columns (time, instrument, t_from_deal, ask_px_0, bid_px_0, usd_ask_px_0, usd_bid_px_0, ret, pnl_usd)
+    - After: 4 columns (time, instrument, t_from_deal, ret OR pnl_usd)
+    """
     # Parse datetime strings - support both date and datetime formats
     def parse_datetime(dt_str: str) -> datetime:
         dt_str = dt_str.strip()
@@ -150,15 +156,20 @@ def _fetch_slices(start_datetime: str, end_datetime: str) -> pd.DataFrame:
     ts_start_str = dt_start.strftime(fmt)
     ts_end_str = dt_end.strftime(fmt)
 
-    # Build SQL query - fetch all slices for deals in this datetime range
+    # OPTIMIZATION: Only fetch columns we actually use!
+    # Select value column based on view
+    value_col = 'ret' if view == 'return' else 'pnl_usd'
+    
+    # Build SQL query - fetch ONLY needed columns (56% less data!)
     sql = f"""
-        SELECT time, instrument, t_from_deal, ask_px_0, bid_px_0, 
-               usd_ask_px_0, usd_bid_px_0, ret, pnl_usd
+        SELECT time, instrument, t_from_deal, {value_col}
         FROM {SLICES_TABLE}
         WHERE time BETWEEN %s AND %s
         ORDER BY time, t_from_deal
     """
 
+    print(f"[DEBUG] Fetching slices with columns: time, instrument, t_from_deal, {value_col}")
+    
     # Execute query
     df = _run_query(sql, (ts_start_str, ts_end_str))
 
@@ -301,10 +312,10 @@ def _build_dataset(start_datetime: str, end_datetime: str, view: str) -> tuple[p
 
     print(f"Found {len(deals_df)} deals for {start_datetime} to {end_datetime}")
 
-    # Fetch all slices for the datetime range
+    # Fetch all slices for the datetime range (OPTIMIZED: only fetch needed columns!)
     import time
     start_time = time.time()
-    slices_df = _fetch_slices(start_datetime, end_datetime)
+    slices_df = _fetch_slices(start_datetime, end_datetime, view=view)
     fetch_time = time.time() - start_time
     print(f"Fetched slices in {fetch_time:.2f}s")
 
@@ -332,10 +343,10 @@ def _build_dataset(start_datetime: str, end_datetime: str, view: str) -> tuple[p
     # Sort each group by t_from_deal for proper ordering
     slices_dict = {}
     for deal_idx, group in merged.groupby('_original_idx'):
-        # Sort by t_from_deal and select only the slice columns
+        # Sort by t_from_deal and select only the columns we fetched
+        # (we now fetch fewer columns based on view - only what's needed!)
         sorted_group = group.sort_values('t_from_deal')[
-            ['time', 'instrument', 't_from_deal', 'ask_px_0', 'bid_px_0', 
-             'usd_ask_px_0', 'usd_bid_px_0', 'ret', 'pnl_usd']
+            [col for col in group.columns if col != '_original_idx']
         ].reset_index(drop=True)
         slices_dict[deal_idx] = sorted_group
     
