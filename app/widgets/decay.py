@@ -439,7 +439,10 @@ def get_widget_layout(n_intervals):
                 id='decay-aggregate-dropdown',
                 options=[
                     {'label': 'None (show all)', 'value': 'none'},
-                    {'label': 'VWA (Volume Weighted Avg)', 'value': 'vwa'},
+                    {'label': 'Instrument', 'value': 'instrument'},
+                    {'label': 'Side', 'value': 'side'},
+                    {'label': 'Day', 'value': 'day'},
+                    {'label': 'Hour', 'value': 'hour'},
                 ],
                 value='none',
                 clearable=False,

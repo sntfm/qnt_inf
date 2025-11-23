@@ -323,14 +323,18 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
         
         traces_added = 0
         
-        if aggregate == 'vwa':
-            # Volume Weighted Average aggregation per instrument
+        if aggregate == 'instrument':
+            # Weighted average by amt_usd per instrument
+            # Use Bold color palette for instruments
+            inst_colors = px.colors.qualitative.Bold
+            inst_color_map = {inst: inst_colors[i % len(inst_colors)] for i, inst in enumerate(unique_instruments)}
+            
             for instrument in unique_instruments:
                 inst_deals = filtered_deals[filtered_deals['instrument'] == instrument]
                 
-                # Collect all slices for this instrument with their USD volumes
+                # Collect all slices for this instrument with their USD amounts
                 inst_slices = []
-                inst_volumes = []
+                inst_weights = []
                 
                 for idx in inst_deals.index:
                     if idx not in slices_dict:
@@ -341,43 +345,243 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
                         continue
                     
                     deal = inst_deals.loc[idx]
-                    # Calculate USD volume for weighting
-                    usd_volume = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else deal['px'] * deal['amt']
+                    # Use amt_usd as weight
+                    weight = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else 0.0
                     
-                    inst_slices.append(slice_df[['t_from_deal', y_column]].copy())
-                    inst_volumes.append(usd_volume)
+                    if weight > 0:
+                        inst_slices.append(slice_df[['t_from_deal', y_column]].copy())
+                        inst_weights.append(weight)
                 
                 if not inst_slices:
                     continue
                 
-                # Combine all slices and compute VWA at each t_from_deal
+                # Combine all slices and compute weighted average at each t_from_deal
                 all_t = sorted(set().union(*[set(s['t_from_deal']) for s in inst_slices]))
                 
-                vwa_y = []
+                weighted_avg_y = []
                 for t in all_t:
                     weighted_sum = 0.0
                     total_weight = 0.0
-                    for slice_df, volume in zip(inst_slices, inst_volumes):
+                    for slice_df, weight in zip(inst_slices, inst_weights):
                         matching = slice_df[slice_df['t_from_deal'] == t]
                         if not matching.empty:
-                            weighted_sum += matching[y_column].iloc[0] * volume
-                            total_weight += volume
+                            weighted_sum += matching[y_column].iloc[0] * weight
+                            total_weight += weight
                     if total_weight > 0:
-                        vwa_y.append(weighted_sum / total_weight)
+                        weighted_avg_y.append(weighted_sum / total_weight)
                     else:
-                        vwa_y.append(np.nan)
+                        weighted_avg_y.append(np.nan)
                 
-                # Plot the VWA line for this instrument
+                # Plot the weighted average line for this instrument
                 fig.add_trace(go.Scatter(
                     x=all_t,
-                    y=vwa_y,
+                    y=weighted_avg_y,
                     mode='lines',
-                    name=f"{instrument} (VWA)",
+                    name=f"{instrument}",
                     legendgroup=instrument,
                     showlegend=True,
                     opacity=0.9,
-                    line=dict(width=2.5, color=color_map.get(instrument, '#636EFA')),
-                    hovertemplate=f"<b>{instrument} (VWA)</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
+                    line=dict(width=2.5, color=inst_color_map.get(instrument, '#636EFA')),
+                    hovertemplate=f"<b>{instrument}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
+                ))
+                traces_added += 1
+        elif aggregate == 'side':
+            # Weighted average by amt_usd per side
+            unique_sides = sorted(filtered_deals['side'].unique())
+            # Use more vibrant colors for buy/sell
+            side_colors = {
+                'buy': '#00D9FF', 'BUY': '#00D9FF',  # Bright cyan for buy
+                'sell': '#FF6B9D', 'SELL': '#FF6B9D'  # Bright pink for sell
+            }
+            
+            for side in unique_sides:
+                side_deals = filtered_deals[filtered_deals['side'] == side]
+                
+                # Collect all slices for this side with their USD amounts
+                side_slices = []
+                side_weights = []
+                
+                for idx in side_deals.index:
+                    if idx not in slices_dict:
+                        continue
+                    
+                    slice_df = slices_dict[idx]
+                    if slice_df.empty:
+                        continue
+                    
+                    deal = side_deals.loc[idx]
+                    # Use amt_usd as weight
+                    weight = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else 0.0
+                    
+                    if weight > 0:
+                        side_slices.append(slice_df[['t_from_deal', y_column]].copy())
+                        side_weights.append(weight)
+                
+                if not side_slices:
+                    continue
+                
+                # Combine all slices and compute weighted average at each t_from_deal
+                all_t = sorted(set().union(*[set(s['t_from_deal']) for s in side_slices]))
+                
+                weighted_avg_y = []
+                for t in all_t:
+                    weighted_sum = 0.0
+                    total_weight = 0.0
+                    for slice_df, weight in zip(side_slices, side_weights):
+                        matching = slice_df[slice_df['t_from_deal'] == t]
+                        if not matching.empty:
+                            weighted_sum += matching[y_column].iloc[0] * weight
+                            total_weight += weight
+                    if total_weight > 0:
+                        weighted_avg_y.append(weighted_sum / total_weight)
+                    else:
+                        weighted_avg_y.append(np.nan)
+                
+                # Plot the weighted average line for this side
+                fig.add_trace(go.Scatter(
+                    x=all_t,
+                    y=weighted_avg_y,
+                    mode='lines',
+                    name=f"{side}",
+                    legendgroup=side,
+                    showlegend=True,
+                    opacity=0.9,
+                    line=dict(width=2.5, color=side_colors.get(side, '#636EFA')),
+                    hovertemplate=f"<b>{side}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
+                ))
+                traces_added += 1
+        elif aggregate == 'day':
+            # Weighted average by amt_usd per day
+            # Add 'day' column to filtered_deals
+            filtered_deals_copy = filtered_deals.copy()
+            filtered_deals_copy['day'] = pd.to_datetime(filtered_deals_copy['time']).dt.date
+            unique_days = sorted(filtered_deals_copy['day'].unique())
+            
+            # Create color map for days - use Vivid palette for vibrant colors
+            day_colors = px.colors.qualitative.Vivid
+            day_color_map = {day: day_colors[i % len(day_colors)] for i, day in enumerate(unique_days)}
+            
+            for day in unique_days:
+                day_deals = filtered_deals_copy[filtered_deals_copy['day'] == day]
+                
+                # Collect all slices for this day with their USD amounts
+                day_slices = []
+                day_weights = []
+                
+                for idx in day_deals.index:
+                    if idx not in slices_dict:
+                        continue
+                    
+                    slice_df = slices_dict[idx]
+                    if slice_df.empty:
+                        continue
+                    
+                    deal = day_deals.loc[idx]
+                    # Use amt_usd as weight
+                    weight = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else 0.0
+                    
+                    if weight > 0:
+                        day_slices.append(slice_df[['t_from_deal', y_column]].copy())
+                        day_weights.append(weight)
+                
+                if not day_slices:
+                    continue
+                
+                # Combine all slices and compute weighted average at each t_from_deal
+                all_t = sorted(set().union(*[set(s['t_from_deal']) for s in day_slices]))
+                
+                weighted_avg_y = []
+                for t in all_t:
+                    weighted_sum = 0.0
+                    total_weight = 0.0
+                    for slice_df, weight in zip(day_slices, day_weights):
+                        matching = slice_df[slice_df['t_from_deal'] == t]
+                        if not matching.empty:
+                            weighted_sum += matching[y_column].iloc[0] * weight
+                            total_weight += weight
+                    if total_weight > 0:
+                        weighted_avg_y.append(weighted_sum / total_weight)
+                    else:
+                        weighted_avg_y.append(np.nan)
+                
+                # Plot the weighted average line for this day
+                fig.add_trace(go.Scatter(
+                    x=all_t,
+                    y=weighted_avg_y,
+                    mode='lines',
+                    name=f"{day}",
+                    legendgroup=str(day),
+                    showlegend=True,
+                    opacity=0.9,
+                    line=dict(width=2.5, color=day_color_map.get(day, '#636EFA')),
+                    hovertemplate=f"<b>{day}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
+                ))
+                traces_added += 1
+        elif aggregate == 'hour':
+            # Weighted average by amt_usd per hour
+            # Add 'hour' column to filtered_deals
+            filtered_deals_copy = filtered_deals.copy()
+            filtered_deals_copy['hour'] = pd.to_datetime(filtered_deals_copy['time']).dt.hour
+            unique_hours = sorted(filtered_deals_copy['hour'].unique())
+            
+            # Create color map for hours - use T10 palette for vibrant colors
+            hour_colors = px.colors.qualitative.T10
+            hour_color_map = {hour: hour_colors[i % len(hour_colors)] for i, hour in enumerate(unique_hours)}
+            
+            for hour in unique_hours:
+                hour_deals = filtered_deals_copy[filtered_deals_copy['hour'] == hour]
+                
+                # Collect all slices for this hour with their USD amounts
+                hour_slices = []
+                hour_weights = []
+                
+                for idx in hour_deals.index:
+                    if idx not in slices_dict:
+                        continue
+                    
+                    slice_df = slices_dict[idx]
+                    if slice_df.empty:
+                        continue
+                    
+                    deal = hour_deals.loc[idx]
+                    # Use amt_usd as weight
+                    weight = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else 0.0
+                    
+                    if weight > 0:
+                        hour_slices.append(slice_df[['t_from_deal', y_column]].copy())
+                        hour_weights.append(weight)
+                
+                if not hour_slices:
+                    continue
+                
+                # Combine all slices and compute weighted average at each t_from_deal
+                all_t = sorted(set().union(*[set(s['t_from_deal']) for s in hour_slices]))
+                
+                weighted_avg_y = []
+                for t in all_t:
+                    weighted_sum = 0.0
+                    total_weight = 0.0
+                    for slice_df, weight in zip(hour_slices, hour_weights):
+                        matching = slice_df[slice_df['t_from_deal'] == t]
+                        if not matching.empty:
+                            weighted_sum += matching[y_column].iloc[0] * weight
+                            total_weight += weight
+                    if total_weight > 0:
+                        weighted_avg_y.append(weighted_sum / total_weight)
+                    else:
+                        weighted_avg_y.append(np.nan)
+                
+                # Plot the weighted average line for this hour
+                fig.add_trace(go.Scatter(
+                    x=all_t,
+                    y=weighted_avg_y,
+                    mode='lines',
+                    name=f"Hour {hour:02d}",
+                    legendgroup=f"hour_{hour}",
+                    showlegend=True,
+                    opacity=0.9,
+                    line=dict(width=2.5, color=hour_color_map.get(hour, '#636EFA')),
+                    hovertemplate=f"<b>Hour {hour:02d}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
                 ))
                 traces_added += 1
         else:
@@ -427,7 +631,20 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
             xaxis_title="Time from Deal (sec)",
             yaxis_title=yaxis_label,
             hovermode='closest',
-            showlegend=False,
+            showlegend=True,
+            legend=dict(
+                orientation="v",
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=1.01,
+                bgcolor="rgba(255, 255, 255, 0.8)",
+                bordercolor="rgba(0, 0, 0, 0.2)",
+                borderwidth=1
+            ),
+            # Enable legend click interactions
+            # Single click: toggle visibility (hide/show)
+            # Double click: isolate trace (show only that one)
         )
 
         status = f"Plotted {len(filtered_deals)} of {len(deals_df)} deals"
