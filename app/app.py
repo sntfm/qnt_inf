@@ -670,37 +670,54 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
             filtered_deals.drop(columns=['hour'], inplace=True)
         else:
             # No aggregation - show all individual lines
-            for idx in filtered_deals.index:
-                if idx in slices_dict:
-                    slice_df = slices_dict[idx]
-                    
-                    if slice_df.empty or y_column not in slice_df.columns:
-                        continue
-                    
-                    t_from_deal = slice_df['t_from_deal'].tolist()
-                    y_data = slice_df[y_column].tolist()
-                    
-                    if y_data and t_from_deal:
-                        deal = filtered_deals.loc[idx]
-                        instrument = deal['instrument']
+            # OPTIMIZATION: Batch all deals per instrument into single trace with NaN separators
+            # This is MUCH faster than creating 1,500 individual traces!
+            print(f"[DEBUG] Batching {len(filtered_deals)} deals into traces by instrument")
+            
+            import time
+            start_time = time.time()
+            
+            # Group deals by instrument
+            for instrument in unique_instruments:
+                inst_deals = filtered_deals[filtered_deals['instrument'] == instrument]
+                
+                # Collect all x and y data for this instrument with NaN separators
+                all_x = []
+                all_y = []
+                
+                for idx in inst_deals.index:
+                    if idx in slices_dict:
+                        slice_df = slices_dict[idx]
                         
-                        # Only show instrument name in legend (once per instrument)
-                        show_legend = instrument not in legend_added
-                        if show_legend:
-                            legend_added.add(instrument)
+                        if slice_df.empty or y_column not in slice_df.columns:
+                            continue
                         
-                        fig.add_trace(go.Scatter(
-                            x=t_from_deal,
-                            y=y_data,
-                            mode='lines',
-                            name=instrument,
-                            legendgroup=instrument,
-                            showlegend=show_legend,
-                            opacity=0.6,
-                            line=dict(width=1.5, color=color_map.get(instrument, '#636EFA')),
-                            hovertemplate=f"<b>{instrument}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
-                        ))
-                        traces_added += 1
+                        # Append this deal's data
+                        all_x.extend(slice_df['t_from_deal'].tolist())
+                        all_y.extend(slice_df[y_column].tolist())
+                        
+                        # Add NaN separator to create gap between deals
+                        all_x.append(None)
+                        all_y.append(None)
+                
+                if all_x and all_y:
+                    # Create single trace for all deals of this instrument
+                    fig.add_trace(go.Scatter(
+                        x=all_x,
+                        y=all_y,
+                        mode='lines',
+                        name=instrument,
+                        legendgroup=instrument,
+                        showlegend=True,
+                        opacity=0.6,
+                        line=dict(width=1.5, color=color_map.get(instrument, '#636EFA')),
+                        hovertemplate=f"<b>{instrument}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>",
+                        connectgaps=False  # Don't connect across NaN gaps
+                    ))
+                    traces_added += 1
+            
+            elapsed = time.time() - start_time
+            print(f"[DEBUG] Created {traces_added} batched traces in {elapsed:.2f}s (vs {len(filtered_deals)} individual traces)")
         
         print(f"[DEBUG] Added {traces_added} traces to graph")
         
