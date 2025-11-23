@@ -235,9 +235,12 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
     try:
         print(f"[DEBUG] Plotting data for datetime range: {start_datetime} to {end_datetime}, view: {view}")
         print(f"[DEBUG] Filters: instruments={instruments}, sides={sides}, order_kinds={order_kinds}, order_types={order_types}, tifs={tifs}")
+        print(f"[DEBUG] Aggregation mode: {aggregate}")
         
         # Fetch data for the datetime range
+        print(f"[DEBUG] Fetching dataset...")
         deals_df, slices_dict = decay._build_dataset(start_datetime, end_datetime, view=view)
+        print(f"[DEBUG] Dataset fetched successfully")
         
         if deals_df.empty:
             fig = go.Figure()
@@ -323,6 +326,59 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
         
         traces_added = 0
         
+        # Helper function to compute weighted average using pandas (optimized)
+        def compute_weighted_avg_pandas(group_deals, group_name, group_value):
+            """Compute weighted average for a group using efficient pandas operations."""
+            import time
+            start_time = time.time()
+            
+            # Collect all slices for this group
+            all_slices = []
+            
+            for idx in group_deals.index:
+                if idx not in slices_dict:
+                    continue
+                
+                slice_df = slices_dict[idx]
+                if slice_df.empty:
+                    continue
+                
+                deal = group_deals.loc[idx]
+                weight = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else 0.0
+                
+                if weight > 0:
+                    # Add weight and group identifier to slice
+                    slice_copy = slice_df[['t_from_deal', y_column]].copy()
+                    slice_copy['weight'] = weight
+                    slice_copy['deal_idx'] = idx
+                    all_slices.append(slice_copy)
+            
+            if not all_slices:
+                return None, None
+            
+            # Combine all slices into single DataFrame
+            combined = pd.concat(all_slices, ignore_index=True)
+            print(f"[DEBUG] {group_name}={group_value}: Combined {len(all_slices)} slices into {len(combined)} rows")
+            
+            # Compute weighted average at each t_from_deal using pandas groupby
+            # Formula: weighted_avg = sum(value * weight) / sum(weight)
+            combined['weighted_value'] = combined[y_column] * combined['weight']
+            
+            grouped = combined.groupby('t_from_deal').agg({
+                'weighted_value': 'sum',
+                'weight': 'sum'
+            })
+            
+            grouped['weighted_avg'] = grouped['weighted_value'] / grouped['weight']
+            
+            # Sort by t_from_deal
+            grouped = grouped.sort_index()
+            
+            elapsed = time.time() - start_time
+            print(f"[DEBUG] {group_name}={group_value}: Computed weighted avg in {elapsed:.2f}s")
+            
+            return grouped.index.tolist(), grouped['weighted_avg'].tolist()
+        
         if aggregate == 'instrument':
             # Weighted average by amt_usd per instrument
             # Use Bold color palette for instruments
@@ -332,45 +388,10 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
             for instrument in unique_instruments:
                 inst_deals = filtered_deals[filtered_deals['instrument'] == instrument]
                 
-                # Collect all slices for this instrument with their USD amounts
-                inst_slices = []
-                inst_weights = []
+                all_t, weighted_avg_y = compute_weighted_avg_pandas(inst_deals, 'instrument', instrument)
                 
-                for idx in inst_deals.index:
-                    if idx not in slices_dict:
-                        continue
-                    
-                    slice_df = slices_dict[idx]
-                    if slice_df.empty:
-                        continue
-                    
-                    deal = inst_deals.loc[idx]
-                    # Use amt_usd as weight
-                    weight = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else 0.0
-                    
-                    if weight > 0:
-                        inst_slices.append(slice_df[['t_from_deal', y_column]].copy())
-                        inst_weights.append(weight)
-                
-                if not inst_slices:
+                if all_t is None:
                     continue
-                
-                # Combine all slices and compute weighted average at each t_from_deal
-                all_t = sorted(set().union(*[set(s['t_from_deal']) for s in inst_slices]))
-                
-                weighted_avg_y = []
-                for t in all_t:
-                    weighted_sum = 0.0
-                    total_weight = 0.0
-                    for slice_df, weight in zip(inst_slices, inst_weights):
-                        matching = slice_df[slice_df['t_from_deal'] == t]
-                        if not matching.empty:
-                            weighted_sum += matching[y_column].iloc[0] * weight
-                            total_weight += weight
-                    if total_weight > 0:
-                        weighted_avg_y.append(weighted_sum / total_weight)
-                    else:
-                        weighted_avg_y.append(np.nan)
                 
                 # Plot the weighted average line for this instrument
                 fig.add_trace(go.Scatter(
@@ -385,6 +406,7 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
                     hovertemplate=f"<b>{instrument}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
                 ))
                 traces_added += 1
+                
         elif aggregate == 'side':
             # Weighted average by amt_usd per side
             unique_sides = sorted(filtered_deals['side'].unique())
@@ -397,45 +419,10 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
             for side in unique_sides:
                 side_deals = filtered_deals[filtered_deals['side'] == side]
                 
-                # Collect all slices for this side with their USD amounts
-                side_slices = []
-                side_weights = []
+                all_t, weighted_avg_y = compute_weighted_avg_pandas(side_deals, 'side', side)
                 
-                for idx in side_deals.index:
-                    if idx not in slices_dict:
-                        continue
-                    
-                    slice_df = slices_dict[idx]
-                    if slice_df.empty:
-                        continue
-                    
-                    deal = side_deals.loc[idx]
-                    # Use amt_usd as weight
-                    weight = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else 0.0
-                    
-                    if weight > 0:
-                        side_slices.append(slice_df[['t_from_deal', y_column]].copy())
-                        side_weights.append(weight)
-                
-                if not side_slices:
+                if all_t is None:
                     continue
-                
-                # Combine all slices and compute weighted average at each t_from_deal
-                all_t = sorted(set().union(*[set(s['t_from_deal']) for s in side_slices]))
-                
-                weighted_avg_y = []
-                for t in all_t:
-                    weighted_sum = 0.0
-                    total_weight = 0.0
-                    for slice_df, weight in zip(side_slices, side_weights):
-                        matching = slice_df[slice_df['t_from_deal'] == t]
-                        if not matching.empty:
-                            weighted_sum += matching[y_column].iloc[0] * weight
-                            total_weight += weight
-                    if total_weight > 0:
-                        weighted_avg_y.append(weighted_sum / total_weight)
-                    else:
-                        weighted_avg_y.append(np.nan)
                 
                 # Plot the weighted average line for this side
                 fig.add_trace(go.Scatter(
@@ -450,6 +437,7 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
                     hovertemplate=f"<b>{side}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
                 ))
                 traces_added += 1
+                
         elif aggregate == 'day':
             # Weighted average by amt_usd per day
             # Add 'day' column to filtered_deals
@@ -464,45 +452,10 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
             for day in unique_days:
                 day_deals = filtered_deals_copy[filtered_deals_copy['day'] == day]
                 
-                # Collect all slices for this day with their USD amounts
-                day_slices = []
-                day_weights = []
+                all_t, weighted_avg_y = compute_weighted_avg_pandas(day_deals, 'day', day)
                 
-                for idx in day_deals.index:
-                    if idx not in slices_dict:
-                        continue
-                    
-                    slice_df = slices_dict[idx]
-                    if slice_df.empty:
-                        continue
-                    
-                    deal = day_deals.loc[idx]
-                    # Use amt_usd as weight
-                    weight = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else 0.0
-                    
-                    if weight > 0:
-                        day_slices.append(slice_df[['t_from_deal', y_column]].copy())
-                        day_weights.append(weight)
-                
-                if not day_slices:
+                if all_t is None:
                     continue
-                
-                # Combine all slices and compute weighted average at each t_from_deal
-                all_t = sorted(set().union(*[set(s['t_from_deal']) for s in day_slices]))
-                
-                weighted_avg_y = []
-                for t in all_t:
-                    weighted_sum = 0.0
-                    total_weight = 0.0
-                    for slice_df, weight in zip(day_slices, day_weights):
-                        matching = slice_df[slice_df['t_from_deal'] == t]
-                        if not matching.empty:
-                            weighted_sum += matching[y_column].iloc[0] * weight
-                            total_weight += weight
-                    if total_weight > 0:
-                        weighted_avg_y.append(weighted_sum / total_weight)
-                    else:
-                        weighted_avg_y.append(np.nan)
                 
                 # Plot the weighted average line for this day
                 fig.add_trace(go.Scatter(
@@ -517,6 +470,7 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
                     hovertemplate=f"<b>{day}</b><br>t=%{{x}}s<br>y=%{{y:.4f}}<extra></extra>"
                 ))
                 traces_added += 1
+                
         elif aggregate == 'hour':
             # Weighted average by amt_usd per hour
             # Add 'hour' column to filtered_deals
@@ -531,45 +485,10 @@ def plot_decay_data(n_clicks, start_datetime, end_datetime, view,
             for hour in unique_hours:
                 hour_deals = filtered_deals_copy[filtered_deals_copy['hour'] == hour]
                 
-                # Collect all slices for this hour with their USD amounts
-                hour_slices = []
-                hour_weights = []
+                all_t, weighted_avg_y = compute_weighted_avg_pandas(hour_deals, 'hour', hour)
                 
-                for idx in hour_deals.index:
-                    if idx not in slices_dict:
-                        continue
-                    
-                    slice_df = slices_dict[idx]
-                    if slice_df.empty:
-                        continue
-                    
-                    deal = hour_deals.loc[idx]
-                    # Use amt_usd as weight
-                    weight = deal['amt_usd'] if 'amt_usd' in deal and pd.notna(deal['amt_usd']) else 0.0
-                    
-                    if weight > 0:
-                        hour_slices.append(slice_df[['t_from_deal', y_column]].copy())
-                        hour_weights.append(weight)
-                
-                if not hour_slices:
+                if all_t is None:
                     continue
-                
-                # Combine all slices and compute weighted average at each t_from_deal
-                all_t = sorted(set().union(*[set(s['t_from_deal']) for s in hour_slices]))
-                
-                weighted_avg_y = []
-                for t in all_t:
-                    weighted_sum = 0.0
-                    total_weight = 0.0
-                    for slice_df, weight in zip(hour_slices, hour_weights):
-                        matching = slice_df[slice_df['t_from_deal'] == t]
-                        if not matching.empty:
-                            weighted_sum += matching[y_column].iloc[0] * weight
-                            total_weight += weight
-                    if total_weight > 0:
-                        weighted_avg_y.append(weighted_sum / total_weight)
-                    else:
-                        weighted_avg_y.append(np.nan)
                 
                 # Plot the weighted average line for this hour
                 fig.add_trace(go.Scatter(

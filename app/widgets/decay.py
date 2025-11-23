@@ -190,7 +190,11 @@ def _build_dataset(start_datetime: str, end_datetime: str, view: str) -> tuple[p
     print(f"Found {len(deals_df)} deals for {start_datetime} to {end_datetime}")
 
     # Fetch all slices for the datetime range
+    import time
+    start_time = time.time()
     slices_df = _fetch_slices(start_datetime, end_datetime)
+    fetch_time = time.time() - start_time
+    print(f"Fetched slices in {fetch_time:.2f}s")
 
     if slices_df.empty:
         print(f"No slices found for {start_datetime} to {end_datetime}")
@@ -199,26 +203,36 @@ def _build_dataset(start_datetime: str, end_datetime: str, view: str) -> tuple[p
     print(f"Found {len(slices_df)} slices for {start_datetime} to {end_datetime}")
 
     # Build slices_dict: map each deal index to its corresponding slices
+    # OPTIMIZED: Use pandas merge instead of iterating through deals
+    start_time = time.time()
     slices_dict = {}
     
+    # Create a mapping of (time, instrument) to deal index
+    deals_df['_temp_key'] = list(zip(deals_df['time'], deals_df['instrument']))
+    slices_df['_temp_key'] = list(zip(slices_df['time'], slices_df['instrument']))
+    
+    # Group slices by (time, instrument) - much faster than filtering for each deal
+    grouped_slices = slices_df.groupby('_temp_key')
+    
     for idx, deal in deals_df.iterrows():
-        deal_time = deal['time']
-        deal_instrument = deal['instrument']
+        key = (deal['time'], deal['instrument'])
         
-        # Filter slices for this specific deal (matching time and instrument)
-        deal_slices = slices_df[
-            (slices_df['time'] == deal_time) & 
-            (slices_df['instrument'] == deal_instrument)
-        ].copy()
-        
-        if not deal_slices.empty:
+        if key in grouped_slices.groups:
+            deal_slices = grouped_slices.get_group(key).copy()
             # Sort by t_from_deal to ensure proper ordering
             deal_slices = deal_slices.sort_values('t_from_deal').reset_index(drop=True)
+            # Remove the temporary key column
+            deal_slices = deal_slices.drop(columns=['_temp_key'])
             slices_dict[idx] = deal_slices
-
-    print(f"Built {len(slices_dict)} slices for {len(deals_df)} deals")
+    
+    # Clean up temporary columns
+    deals_df.drop(columns=['_temp_key'], inplace=True)
+    
+    build_time = time.time() - start_time
+    print(f"Built {len(slices_dict)} slice groups for {len(deals_df)} deals in {build_time:.2f}s")
 
     return deals_df, slices_dict
+
 
 
 def get_filter_options(start_datetime: str, end_datetime: str) -> dict:
