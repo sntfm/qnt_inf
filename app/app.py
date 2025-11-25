@@ -6,7 +6,7 @@ from flask import redirect
 from datetime import datetime
 
 # Import widgets (will be developed later)
-from widgets import latency, decay
+from widgets import latency, decay, flow
 
 # Initialize the Dash app
 app = dash.Dash(
@@ -46,6 +46,13 @@ def get_main_layout():
 
             # Widget content container (will be updated by filters)
             html.Div(id='latency-widget-container'),
+        ], style={'marginBottom': 40}),
+
+        # Container for flow widget
+        html.Div([
+            html.H2("Flow Metrics",
+                   style={'color': '#34495e', 'borderBottom': '2px solid', 'paddingBottom': 5}),
+            html.Div(id='flow-widget-container'),
         ], style={'marginBottom': 40}),
 
         # Container for decay widget
@@ -154,7 +161,179 @@ def update_latency_on_date_change(date_str):
                   style={'color': '#e74c3c', 'fontStyle': 'italic'}),
             html.Pre(traceback.format_exc(),
                     style={'fontSize': '10px', 'color': '#95a5a6'})
-        ])
+         ])
+
+@app.callback(
+    Output('flow-widget-container', 'children'),
+    Input('url', 'pathname')
+)
+def initialize_flow_widget(pathname):
+    """Initialize flow widget on page load."""
+    if pathname == '/app':
+        try:
+            # Load widget layout once on page load
+            return flow.get_widget_layout(0)
+        except Exception as e:
+            import traceback
+            return html.Div([
+                html.P(f"Flow widget error: {str(e)}",
+                      style={'color': '#e74c3c', 'fontStyle': 'italic'}),
+                html.Pre(traceback.format_exc(),
+                        style={'fontSize': '10px', 'color': '#95a5a6'})
+            ])
+    return html.Div()
+
+# Flow widget callback - Load button
+@app.callback(
+    [Output('flow-graph', 'figure'),
+     Output('flow-status', 'children')],
+    Input('flow-load-button', 'n_clicks'),
+    [State('flow-start-datetime', 'value'),
+     State('flow-end-datetime', 'value')],
+    prevent_initial_call=True
+)
+def load_flow_data(n_clicks, start_datetime, end_datetime):
+    """Fetch flow metrics and plot them."""
+    import plotly.express as px
+    from plotly.subplots import make_subplots
+    
+    try:
+        print(f"[DEBUG] Loading flow data for datetime range: {start_datetime} to {end_datetime}")
+        
+        # Fetch flow metrics
+        metrics_df = flow._fetch_flow_metrics(start_datetime, end_datetime)
+        
+        if metrics_df.empty:
+            fig = make_subplots(
+                rows=3, cols=1,
+                subplot_titles=('PnL (USD)', 'Volume (USD)', 'Number of Deals'),
+                vertical_spacing=0.12
+            )
+            fig.update_layout(
+                margin=dict(l=40, r=20, t=80, b=40),
+                template="plotly_white",
+                height=800,
+                showlegend=False,
+                annotations=[
+                    dict(
+                        text=f"No data found for {start_datetime} to {end_datetime}",
+                        xref="paper",
+                        yref="paper",
+                        x=0.5,
+                        y=0.5,
+                        showarrow=False,
+                        font=dict(size=14, color="#e74c3c"),
+                    )
+                ],
+            )
+            return fig, f"No data found for {start_datetime} to {end_datetime}"
+        
+        print(f"[DEBUG] Found {len(metrics_df)} days of data")
+        
+        # Create figure with 3 subplots
+        fig = make_subplots(
+            rows=3, cols=1,
+            subplot_titles=('PnL (USD)', 'Volume (USD)', 'Number of Deals'),
+            vertical_spacing=0.12,
+            specs=[[{"type": "scatter"}], [{"type": "scatter"}], [{"type": "scatter"}]]
+        )
+        
+        # Add PnL trace
+        fig.add_trace(
+            go.Scatter(
+                x=metrics_df['date'],
+                y=metrics_df['total_pnl_usd'],
+                mode='lines+markers',
+                name='PnL',
+                line=dict(color='#2ecc71', width=2.5),
+                marker=dict(size=8, color='#27ae60'),
+                hovertemplate='<b>%{x|%Y-%m-%d}</b><br>PnL: $%{y:,.2f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+        
+        # Add Volume trace
+        fig.add_trace(
+            go.Scatter(
+                x=metrics_df['date'],
+                y=metrics_df['total_volume_usd'],
+                mode='lines+markers',
+                name='Volume',
+                line=dict(color='#3498db', width=2.5),
+                marker=dict(size=8, color='#2980b9'),
+                hovertemplate='<b>%{x|%Y-%m-%d}</b><br>Volume: $%{y:,.2f}<extra></extra>'
+            ),
+            row=2, col=1
+        )
+        
+        # Add Deal Count trace
+        fig.add_trace(
+            go.Scatter(
+                x=metrics_df['date'],
+                y=metrics_df['deal_count'],
+                mode='lines+markers',
+                name='Deals',
+                line=dict(color='#e74c3c', width=2.5),
+                marker=dict(size=8, color='#c0392b'),
+                hovertemplate='<b>%{x|%Y-%m-%d}</b><br>Deals: %{y}<extra></extra>'
+            ),
+            row=3, col=1
+        )
+        
+        # Update layout
+        fig.update_layout(
+            margin=dict(l=40, r=20, t=80, b=40),
+            template="plotly_white",
+            height=800,
+            showlegend=False,
+            hovermode='x unified'
+        )
+        
+        # Update axes labels
+        fig.update_xaxes(title_text="Date", row=3, col=1)
+        fig.update_yaxes(title_text="PnL ($)", row=1, col=1)
+        fig.update_yaxes(title_text="Volume ($)", row=2, col=1)
+        fig.update_yaxes(title_text="Count", row=3, col=1)
+        
+        # Add zero reference lines
+        fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5, row=1, col=1)
+        
+        # Calculate summary stats
+        total_pnl = metrics_df['total_pnl_usd'].sum()
+        total_volume = metrics_df['total_volume_usd'].sum()
+        total_deals = metrics_df['deal_count'].sum()
+        
+        status = f"Loaded {len(metrics_df)} days | Total PnL: ${total_pnl:,.2f} | Total Volume: ${total_volume:,.2f} | Total Deals: {total_deals:,}"
+        
+        return fig, status
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        
+        fig = make_subplots(
+            rows=3, cols=1,
+            subplot_titles=('PnL (USD)', 'Volume (USD)', 'Number of Deals'),
+            vertical_spacing=0.12
+        )
+        fig.update_layout(
+            margin=dict(l=40, r=20, t=80, b=40),
+            template="plotly_white",
+            height=800,
+            showlegend=False,
+            annotations=[
+                dict(
+                    text=f"Error: {str(e)}",
+                    xref="paper",
+                    yref="paper",
+                    x=0.5,
+                    y=0.5,
+                    showarrow=False,
+                    font=dict(size=14, color="#e74c3c"),
+                )
+            ],
+        )
+        return fig, f"Error: {str(e)}"
 
 @app.callback(
     Output('decay-widget-container', 'children'),
