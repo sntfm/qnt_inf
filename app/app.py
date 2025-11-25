@@ -50,7 +50,7 @@ def get_main_layout():
 
         # Container for flow widget
         html.Div([
-            html.H2("Flow Metrics",
+            html.H2("PnL/Exposure",
                    style={'color': '#34495e', 'borderBottom': '2px solid', 'paddingBottom': 5}),
             html.Div(id='flow-widget-container'),
         ], style={'marginBottom': 40}),
@@ -186,34 +186,42 @@ def initialize_flow_widget(pathname):
 # Flow widget callback - Load button
 @app.callback(
     [Output('flow-graph', 'figure'),
-     Output('flow-status', 'children')],
+     Output('flow-status', 'children'),
+     Output('flow-instrument-filter', 'options')],
     Input('flow-load-button', 'n_clicks'),
     [State('flow-start-datetime', 'value'),
-     State('flow-end-datetime', 'value')],
+     State('flow-end-datetime', 'value'),
+     State('flow-instrument-filter', 'value')],
     prevent_initial_call=True
 )
-def load_flow_data(n_clicks, start_datetime, end_datetime):
-    """Fetch flow metrics and plot them."""
-    import plotly.express as px
+def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments):
+    """Fetch flow metrics and plot them with two panes: PnL curves and Volume curves."""
     from plotly.subplots import make_subplots
-    
+
     try:
         print(f"[DEBUG] Loading flow data for datetime range: {start_datetime} to {end_datetime}")
-        
+        print(f"[DEBUG] Selected instruments: {selected_instruments}")
+
+        # Fetch available instruments for the dropdown
+        available_instruments = flow._fetch_available_instruments(start_datetime, end_datetime)
+        instrument_options = [{'label': inst, 'value': inst} for inst in available_instruments]
+
         # Fetch flow metrics
-        metrics_df = flow._fetch_flow_metrics(start_datetime, end_datetime)
-        
+        instruments_filter = selected_instruments if selected_instruments else None
+        metrics_df = flow._fetch_flow_metrics(start_datetime, end_datetime, instruments=instruments_filter)
+
         if metrics_df.empty:
             fig = make_subplots(
-                rows=3, cols=1,
-                subplot_titles=('PnL (USD)', 'Volume (USD)', 'Number of Deals'),
-                vertical_spacing=0.12
+                rows=2, cols=1,
+                subplot_titles=('PnL Curves (USD)', 'Volume Curves (USD)'),
+                vertical_spacing=0.15,
+                specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]]
             )
             fig.update_layout(
                 margin=dict(l=40, r=20, t=80, b=40),
                 template="plotly_white",
                 height=800,
-                showlegend=False,
+                showlegend=True,
                 annotations=[
                     dict(
                         text=f"No data found for {start_datetime} to {end_datetime}",
@@ -226,101 +234,165 @@ def load_flow_data(n_clicks, start_datetime, end_datetime):
                     )
                 ],
             )
-            return fig, f"No data found for {start_datetime} to {end_datetime}"
-        
-        print(f"[DEBUG] Found {len(metrics_df)} days of data")
-        
-        # Create figure with 3 subplots
+            return fig, f"No data found for {start_datetime} to {end_datetime}", instrument_options
+
+        print(f"[DEBUG] Found {len(metrics_df)} data points")
+
+        # Group by timestamp and sum across all instruments (if multiple)
+        # This creates aggregate curves when multiple instruments are selected
+        agg_df = metrics_df.groupby('ts').agg({
+            'upnl_usd': 'sum',
+            'rpnl_usd': 'sum',
+            'tpnl_usd': 'sum',
+            'volume_usd': 'sum',
+            'cum_volume_usd': 'sum',
+            'num_deals': 'sum'
+        }).reset_index()
+
+        # Create figure with 2 subplots (panes)
+        # Second subplot has secondary y-axis for num_deals
         fig = make_subplots(
-            rows=3, cols=1,
-            subplot_titles=('PnL (USD)', 'Volume (USD)', 'Number of Deals'),
-            vertical_spacing=0.12,
-            specs=[[{"type": "scatter"}], [{"type": "scatter"}], [{"type": "scatter"}]]
+            rows=2, cols=1,
+            subplot_titles=('PnL Curves (USD)', 'Volume Curves (USD)'),
+            vertical_spacing=0.15,
+            specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]]
         )
-        
-        # Add PnL trace
+
+        # === Pane 1: PnL curves ===
+        # Add UPNL trace
         fig.add_trace(
             go.Scatter(
-                x=metrics_df['date'],
-                y=metrics_df['total_pnl_usd'],
-                mode='lines+markers',
-                name='PnL',
-                line=dict(color='#2ecc71', width=2.5),
-                marker=dict(size=8, color='#27ae60'),
-                hovertemplate='<b>%{x|%Y-%m-%d}</b><br>PnL: $%{y:,.2f}<extra></extra>'
+                x=agg_df['ts'],
+                y=agg_df['upnl_usd'],
+                mode='lines',
+                name='UPNL',
+                line=dict(color='#3498db', width=2),
+                hovertemplate='<b>%{x}</b><br>UPNL: $%{y:,.2f}<extra></extra>'
             ),
             row=1, col=1
         )
-        
+
+        # Add RPNL trace
+        fig.add_trace(
+            go.Scatter(
+                x=agg_df['ts'],
+                y=agg_df['rpnl_usd'],
+                mode='lines',
+                name='RPNL',
+                line=dict(color='#e74c3c', width=2),
+                hovertemplate='<b>%{x}</b><br>RPNL: $%{y:,.2f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+
+        # Add Total PnL trace (using tpnl_usd from database)
+        fig.add_trace(
+            go.Scatter(
+                x=agg_df['ts'],
+                y=agg_df['tpnl_usd'],
+                mode='lines',
+                name='Total PnL',
+                line=dict(color='#2ecc71', width=2.5),
+                hovertemplate='<b>%{x}</b><br>Total PnL: $%{y:,.2f}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+
+        # === Pane 2: Volume curves ===
         # Add Volume trace
         fig.add_trace(
             go.Scatter(
-                x=metrics_df['date'],
-                y=metrics_df['total_volume_usd'],
-                mode='lines+markers',
+                x=agg_df['ts'],
+                y=agg_df['volume_usd'],
+                mode='lines',
                 name='Volume',
-                line=dict(color='#3498db', width=2.5),
-                marker=dict(size=8, color='#2980b9'),
-                hovertemplate='<b>%{x|%Y-%m-%d}</b><br>Volume: $%{y:,.2f}<extra></extra>'
+                line=dict(color='#9b59b6', width=2),
+                hovertemplate='<b>%{x}</b><br>Volume: $%{y:,.2f}<extra></extra>'
             ),
             row=2, col=1
         )
-        
-        # Add Deal Count trace
+
+        # Add Cumulative Volume trace
         fig.add_trace(
             go.Scatter(
-                x=metrics_df['date'],
-                y=metrics_df['deal_count'],
-                mode='lines+markers',
-                name='Deals',
-                line=dict(color='#e74c3c', width=2.5),
-                marker=dict(size=8, color='#c0392b'),
-                hovertemplate='<b>%{x|%Y-%m-%d}</b><br>Deals: %{y}<extra></extra>'
+                x=agg_df['ts'],
+                y=agg_df['cum_volume_usd'],
+                mode='lines',
+                name='Cum. Volume',
+                line=dict(color='#f39c12', width=2),
+                hovertemplate='<b>%{x}</b><br>Cum. Volume: $%{y:,.2f}<extra></extra>'
             ),
-            row=3, col=1
+            row=2, col=1,
+            secondary_y=False
         )
-        
+
+        # Add Number of Deals trace on secondary y-axis
+        fig.add_trace(
+            go.Scatter(
+                x=agg_df['ts'],
+                y=agg_df['num_deals'],
+                mode='lines',
+                name='# Deals',
+                line=dict(color='#95a5a6', width=1.5, dash='dot'),
+                hovertemplate='<b>%{x}</b><br># Deals: %{y}<extra></extra>'
+            ),
+            row=2, col=1,
+            secondary_y=True
+        )
+
         # Update layout
         fig.update_layout(
             margin=dict(l=40, r=20, t=80, b=40),
             template="plotly_white",
             height=800,
-            showlegend=False,
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
+            ),
             hovermode='x unified'
         )
-        
-        # Update axes labels
-        fig.update_xaxes(title_text="Date", row=3, col=1)
+
+        # Update axes labels and synchronize x-axes
+        fig.update_xaxes(title_text="Time", row=2, col=1)
+        fig.update_xaxes(matches='x', row=1, col=1)  # Sync x-axis on row 1 with row 2
         fig.update_yaxes(title_text="PnL ($)", row=1, col=1)
-        fig.update_yaxes(title_text="Volume ($)", row=2, col=1)
-        fig.update_yaxes(title_text="Count", row=3, col=1)
-        
-        # Add zero reference lines
+        fig.update_yaxes(title_text="Volume ($)", row=2, col=1, secondary_y=False)
+        fig.update_yaxes(title_text="# Deals", row=2, col=1, secondary_y=True)
+
+        # Add zero reference lines to PnL pane
         fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5, row=1, col=1)
-        
+
         # Calculate summary stats
-        total_pnl = metrics_df['total_pnl_usd'].sum()
-        total_volume = metrics_df['total_volume_usd'].sum()
-        total_deals = metrics_df['deal_count'].sum()
-        
-        status = f"Loaded {len(metrics_df)} days | Total PnL: ${total_pnl:,.2f} | Total Volume: ${total_volume:,.2f} | Total Deals: {total_deals:,}"
-        
-        return fig, status
-        
+        total_pnl = agg_df['tpnl_usd'].iloc[-1] if len(agg_df) > 0 else 0
+        total_upnl = agg_df['upnl_usd'].iloc[-1] if len(agg_df) > 0 else 0
+        total_rpnl = agg_df['rpnl_usd'].sum()
+        total_volume = agg_df['volume_usd'].sum()
+        total_deals = int(agg_df['num_deals'].sum())
+
+        instruments_str = f"{len(selected_instruments)} instruments" if selected_instruments else "All instruments"
+        status = f"{instruments_str} | Total PnL: ${total_pnl:,.2f} (UPNL: ${total_upnl:,.2f}, RPNL: ${total_rpnl:,.2f}) | Volume: ${total_volume:,.2f} | Deals: {total_deals:,}"
+
+        return fig, status, instrument_options
+
     except Exception as e:
         import traceback
         traceback.print_exc()
-        
+
         fig = make_subplots(
-            rows=3, cols=1,
-            subplot_titles=('PnL (USD)', 'Volume (USD)', 'Number of Deals'),
-            vertical_spacing=0.12
+            rows=2, cols=1,
+            subplot_titles=('PnL Curves (USD)', 'Volume Curves (USD)'),
+            vertical_spacing=0.15,
+            specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]]
         )
         fig.update_layout(
             margin=dict(l=40, r=20, t=80, b=40),
             template="plotly_white",
             height=800,
-            showlegend=False,
+            showlegend=True,
             annotations=[
                 dict(
                     text=f"Error: {str(e)}",
@@ -333,7 +405,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime):
                 )
             ],
         )
-        return fig, f"Error: {str(e)}"
+        return fig, f"Error: {str(e)}", []
 
 @app.callback(
     Output('decay-widget-container', 'children'),

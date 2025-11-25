@@ -1,10 +1,11 @@
 """
 Flow widget for Dash app.
 
-Displays aggregate metrics for a date range:
-- PNL in USD
-- Volume in USD
-- Quantity of deals
+Displays two panes:
+1. PNL curves: upnl_usd, rpnl_usd, total_pnl (upnl + rpnl)
+2. Volume curves: volume_usd, cum_volume_usd
+
+Supports filtration by instrument.
 """
 
 from dash import html, dcc
@@ -22,8 +23,7 @@ from psycopg2.extras import RealDictCursor
 # ---------------------------------------------------------------------------
 # Table names
 # ---------------------------------------------------------------------------
-DEALS_TABLE = "mart_kraken_decay_deals"
-SLICES_TABLE = "mart_kraken_decay_slices"
+FLOW_MART_TABLE = "mart_pnl_flow"
 
 
 # ---------------------------------------------------------------------------
@@ -60,10 +60,10 @@ def _run_query(sql: str, params: tuple = ()) -> pd.DataFrame:
 
 
 def _fetch_available_dates() -> List[str]:
-    """Fetch list of available dates from the deals datamart."""
+    """Fetch list of available dates from the flow mart table."""
     sql = f"""
-        SELECT DISTINCT CAST(DATE_TRUNC('day', time) AS DATE) as date
-        FROM {DEALS_TABLE}
+        SELECT DISTINCT CAST(DATE_TRUNC('day', ts) AS DATE) as date
+        FROM {FLOW_MART_TABLE}
         ORDER BY date DESC
     """
     df = _run_query(sql)
@@ -74,15 +74,58 @@ def _fetch_available_dates() -> List[str]:
     return [d.isoformat() for d in dates]
 
 
-def _fetch_flow_metrics(start_datetime: str, end_datetime: str) -> pd.DataFrame:
+def _fetch_available_instruments(start_datetime: str, end_datetime: str) -> List[str]:
+    """Fetch list of available instruments for the given date range."""
+    # Parse datetime strings
+    def parse_datetime(dt_str: str) -> datetime:
+        dt_str = dt_str.strip()
+        for fmt in ['%Y-%m-%d %H:%M:%S', '%Y-%m-%d']:
+            try:
+                dt = datetime.strptime(dt_str, fmt)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except ValueError:
+                continue
+        raise ValueError(f"Cannot parse datetime: {dt_str}")
+
+    dt_start = parse_datetime(start_datetime)
+    dt_end = parse_datetime(end_datetime)
+
+    # Format timestamps for QuestDB
+    fmt = '%Y-%m-%dT%H:%M:%S.%fZ'
+    ts_start_str = dt_start.strftime(fmt)
+    ts_end_str = dt_end.strftime(fmt)
+
+    sql = f"""
+        SELECT DISTINCT instrument
+        FROM {FLOW_MART_TABLE}
+        WHERE ts BETWEEN %s AND %s
+        ORDER BY instrument
     """
-    Fetch flow metrics aggregated by day for a given datetime range.
-    
-    Returns DataFrame with columns:
-    - date: The date (day)
-    - total_pnl_usd: Sum of PnL in USD for all deals on that day
-    - total_volume_usd: Sum of volume (amt_usd) for all deals on that day
-    - deal_count: Number of deals on that day
+    df = _run_query(sql, (ts_start_str, ts_end_str))
+    if df.empty:
+        return []
+    return df['instrument'].tolist()
+
+
+def _fetch_flow_metrics(start_datetime: str, end_datetime: str, instruments: List[str] = None) -> pd.DataFrame:
+    """
+    Fetch flow metrics from mart_pnl_flow table for a given datetime range.
+
+    Args:
+        start_datetime: Start datetime string
+        end_datetime: End datetime string
+        instruments: Optional list of instruments to filter by
+
+    Returns:
+        DataFrame with columns:
+        - ts: Timestamp (1-minute buckets)
+        - instrument: Instrument name
+        - upnl_usd: Unrealized PnL
+        - rpnl_usd: Realized PnL
+        - volume_usd: Volume in USD
+        - cum_volume_usd: Cumulative volume in USD
     """
     # Parse datetime strings - support both date and datetime formats
     def parse_datetime(dt_str: str) -> datetime:
@@ -97,7 +140,7 @@ def _fetch_flow_metrics(start_datetime: str, end_datetime: str) -> pd.DataFrame:
             except ValueError:
                 continue
         raise ValueError(f"Cannot parse datetime: {dt_str}")
-    
+
     dt_start = parse_datetime(start_datetime)
     dt_end = parse_datetime(end_datetime)
 
@@ -106,75 +149,52 @@ def _fetch_flow_metrics(start_datetime: str, end_datetime: str) -> pd.DataFrame:
     ts_start_str = dt_start.strftime(fmt)
     ts_end_str = dt_end.strftime(fmt)
 
-    # QuestDB has limitations with complex queries, so we'll use a two-query approach:
-    # 1. Get daily deal aggregates (volume, count)
-    # 2. Get daily PnL aggregates
-    # Then merge them in Python
-    
-    # Query 1: Daily deal metrics
-    deals_sql = f"""
-        SELECT 
-            CAST(timestamp_floor('d', time) AS DATE) AS date,
-            SUM(amt_usd) AS total_volume_usd,
-            COUNT(*) AS deal_count
-        FROM {DEALS_TABLE}
-        WHERE time BETWEEN %s AND %s
-        GROUP BY CAST(timestamp_floor('d', time) AS DATE)
-        ORDER BY date
+    # Build WHERE clause
+    where_clauses = [f"ts BETWEEN %s AND %s"]
+    params = [ts_start_str, ts_end_str]
+
+    if instruments:
+        placeholders = ','.join(['%s'] * len(instruments))
+        where_clauses.append(f"instrument IN ({placeholders})")
+        params.extend(instruments)
+
+    where_clause = " AND ".join(where_clauses)
+
+    # Query flow metrics
+    sql = f"""
+        SELECT
+            ts,
+            instrument,
+            upnl_usd,
+            rpnl_usd,
+            tpnl_usd,
+            volume_usd,
+            cum_volume_usd,
+            num_deals
+        FROM {FLOW_MART_TABLE}
+        WHERE {where_clause}
+        ORDER BY ts, instrument
     """
-    
-    # Query 2: Daily PnL (using max t_from_deal for each deal)
-    pnl_sql = f"""
-        WITH ranked_slices AS (
-            SELECT 
-                CAST(timestamp_floor('d', time) AS DATE) AS date,
-                time,
-                instrument,
-                pnl_usd,
-                ROW_NUMBER() OVER (PARTITION BY time, instrument ORDER BY t_from_deal DESC) AS rn
-            FROM {SLICES_TABLE}
-            WHERE time BETWEEN %s AND %s
-        )
-        SELECT 
-            date,
-            SUM(pnl_usd) AS total_pnl_usd
-        FROM ranked_slices
-        WHERE rn = 1
-        GROUP BY date
-        ORDER BY date
-    """
-    
-    # Execute both queries
-    deals_df = _run_query(deals_sql, (ts_start_str, ts_end_str))
-    pnl_df = _run_query(pnl_sql, (ts_start_str, ts_end_str))
-    
-    # Merge the results
-    if deals_df.empty:
+
+    # Execute query
+    df = _run_query(sql, tuple(params))
+
+    if df.empty:
         return pd.DataFrame()
-    
-    # Convert dates to datetime for merging
-    if not deals_df.empty and 'date' in deals_df.columns:
-        deals_df['date'] = pd.to_datetime(deals_df['date'])
-    if not pnl_df.empty and 'date' in pnl_df.columns:
-        pnl_df['date'] = pd.to_datetime(pnl_df['date'])
-    
-    # Merge deals and PnL data
-    if not pnl_df.empty:
-        df = deals_df.merge(pnl_df, on='date', how='left')
-        # Fill missing PnL with 0
-        df['total_pnl_usd'] = df['total_pnl_usd'].fillna(0)
-    else:
-        # No PnL data, add column with zeros
-        df = deals_df.copy()
-        df['total_pnl_usd'] = 0
-    
+
+    # Convert ts to datetime
+    if 'ts' in df.columns:
+        df['ts'] = pd.to_datetime(df['ts'], utc=True)
+
     return df
 
 
 
 def get_widget_layout(n_intervals):
     """
-    Flow widget with date range selection and metrics display.
+    Flow widget with two panes:
+    1. PNL curves (upnl_usd, rpnl_usd, total_pnl)
+    2. Volume curves (volume_usd, cum_volume_usd)
 
     Args:
         n_intervals: Number of intervals (from dcc.Interval component)
@@ -182,19 +202,27 @@ def get_widget_layout(n_intervals):
     Returns:
         Dash HTML layout with graphs and filters
     """
-    # Create initial empty figure with 3 subplots
+    # Create initial empty figure with 2 subplots (rows)
+    # Second subplot has secondary y-axis for num_deals
     fig = make_subplots(
-        rows=3, cols=1,
-        subplot_titles=('PnL (USD)', 'Volume (USD)', 'Number of Deals'),
-        vertical_spacing=0.12,
-        specs=[[{"type": "scatter"}], [{"type": "scatter"}], [{"type": "scatter"}]]
+        rows=2, cols=1,
+        subplot_titles=('PnL (USD) flow', 'Exposure (USD) flow'),
+        vertical_spacing=0.15,
+        specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]]
     )
-    
+
     fig.update_layout(
         margin=dict(l=40, r=20, t=80, b=40),
         template="plotly_white",
         height=800,
-        showlegend=False,
+        showlegend=True,
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="right",
+            x=1
+        ),
         annotations=[
             dict(
                 text="Select date range and click 'Load Data' to see flow metrics",
@@ -210,7 +238,7 @@ def get_widget_layout(n_intervals):
 
     # Fetch available dates for default values
     available_dates = _fetch_available_dates()
-    
+
     # Determine default date range
     if available_dates:
         # Use most recent date as default
@@ -229,6 +257,13 @@ def get_widget_layout(n_intervals):
         week_ago = today - timedelta(days=6)
         default_start = f"{week_ago.isoformat()} 00:00:00"
         default_end = f"{today.isoformat()} 23:59:59"
+
+    # Fetch initial instrument options for default date range
+    try:
+        initial_instruments = _fetch_available_instruments(default_start, default_end)
+        initial_instrument_options = [{'label': inst, 'value': inst} for inst in initial_instruments]
+    except Exception:
+        initial_instrument_options = []
 
     # Right panel with filters
     right_panel = html.Div([
@@ -272,9 +307,24 @@ def get_widget_layout(n_intervals):
 
         html.Hr(style={'border': 'none', 'borderTop': '1px solid #e0e0e0', 'margin': '12px 0'}),
 
+        # Instrument filter
+        html.Div([
+            html.Label("Instrument:", style={'fontWeight': '600', 'marginBottom': '4px', 'display': 'block', 'color': '#7f8c8d', 'fontSize': '13px'}),
+            dcc.Dropdown(
+                id='flow-instrument-filter',
+                options=initial_instrument_options,
+                value=[],
+                multi=True,
+                placeholder='All instruments',
+                style={'marginBottom': '12px', 'fontSize': '14px', 'color': '#2c3e50'}
+            ),
+        ]),
+
+        html.Hr(style={'border': 'none', 'borderTop': '1px solid #e0e0e0', 'margin': '12px 0'}),
+
         # Load button
         html.Button(
-            'Load Data',
+            'Plot',
             id='flow-load-button',
             n_clicks=0,
             style={
@@ -338,15 +388,37 @@ def get_widget_layout(n_intervals):
         'backgroundColor': '#ffffff',
         'padding': '20px',
         'borderRadius': '12px',
-        'boxShadow': '0 2px 8px rgba(0,0,0,0.08)'
+        'boxShadow': '0 2px 8px rgba(0,0,0,0.08)',
+        'marginBottom': '40px'  # Add space after widget to prevent overlap
     })
 
 
 if __name__ == "__main__":
     # Test fetching data
-    metrics_df = _fetch_flow_metrics("2025-10-28 00:00:00", "2025-10-28 23:59:59")
-    print(f"\nFlow Metrics: {len(metrics_df)} days")
-    
-    if not metrics_df.empty:
-        print("\nMetrics:")
-        print(metrics_df)
+    print("Testing flow widget data fetching...")
+
+    # Test available dates
+    dates = _fetch_available_dates()
+    print(f"\nAvailable dates: {dates[:5] if dates else 'None'}")
+
+    if dates:
+        # Test fetching instruments
+        test_start = f"{dates[0]} 00:00:00"
+        test_end = f"{dates[0]} 23:59:59"
+
+        instruments = _fetch_available_instruments(test_start, test_end)
+        print(f"\nAvailable instruments for {dates[0]}: {instruments}")
+
+        # Test fetching metrics (all instruments)
+        metrics_df = _fetch_flow_metrics(test_start, test_end)
+        print(f"\nFlow Metrics (all instruments): {len(metrics_df)} rows")
+
+        if not metrics_df.empty:
+            print("\nFirst few rows:")
+            print(metrics_df.head(10))
+            print(f"\nColumns: {metrics_df.columns.tolist()}")
+
+        # Test fetching metrics (filtered by instrument)
+        if instruments:
+            filtered_df = _fetch_flow_metrics(test_start, test_end, instruments=[instruments[0]])
+            print(f"\nFlow Metrics (filtered to {instruments[0]}): {len(filtered_df)} rows")

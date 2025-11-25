@@ -154,17 +154,21 @@ def _update(date_str: str):
     insert_sql = f"""
     INSERT INTO {MART_TABLE} (ts, instrument, amt_signed, avg_px, avg_px_usd, volume_usd, num_deals,
                               ask_px_0, bid_px_0, ask_px_0_usd, bid_px_0_usd, rpnl_usd,
-                              cum_amt, cum_volume_usd, prev_cum_volume_usd, upnl_usd)
+                              cum_amt, cum_volume_usd, prev_cum_volume_usd, upnl_usd, tpnl_usd)
     SELECT
         ts, instrument, amt_signed, avg_px, avg_px_usd,
         amt_signed * avg_px_usd AS volume_usd,
         num_deals,
         ask_px_0, bid_px_0, ask_px_0_usd, bid_px_0_usd,
-        amt_signed * (CASE WHEN amt_signed < 0 THEN ask_px_0_usd ELSE bid_px_0_usd END - avg_px_usd) AS rpnl_usd,
+        COALESCE(amt_signed * (CASE WHEN amt_signed < 0 THEN ask_px_0_usd ELSE bid_px_0_usd END - avg_px_usd), 0) AS rpnl_usd,
         cum_amt, cum_volume_usd, prev_cum_volume_usd,
         CASE WHEN prev_cum_volume_usd IS NULL OR prev_cum_volume_usd = 0 THEN 0
              ELSE (cum_volume_usd / prev_cum_volume_usd - 1) * prev_cum_volume_usd
-        END AS upnl_usd
+        END AS upnl_usd,
+        COALESCE(amt_signed * (CASE WHEN amt_signed < 0 THEN ask_px_0_usd ELSE bid_px_0_usd END - avg_px_usd), 0) +
+        CASE WHEN prev_cum_volume_usd IS NULL OR prev_cum_volume_usd = 0 THEN 0
+             ELSE (cum_volume_usd / prev_cum_volume_usd - 1) * prev_cum_volume_usd
+        END AS tpnl_usd
     FROM temp_with_lag
     ORDER BY ts
     """

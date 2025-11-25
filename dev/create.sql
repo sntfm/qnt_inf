@@ -72,5 +72,6 @@ CREATE TABLE mart_pnl_flow (
     cum_amt DOUBLE,              -- cumulative position (running sum of amt_signed)
     cum_volume_usd DOUBLE,       -- cumulative notional value: cum_amt * mtm_price
     prev_cum_volume_usd DOUBLE,  -- previous bucket's cumulative notional value
-    upnl_usd DOUBLE              -- unrealized PnL: (cum_volume_usd / prev_cum_volume_usd - 1) * prev_cum_volume_usd (zero at inception)
+    upnl_usd DOUBLE,             -- unrealized PnL: (cum_volume_usd / prev_cum_volume_usd - 1) * prev_cum_volume_usd (zero at inception)
+    tpnl_usd DOUBLE              -- total PnL: rpnl_usd + upnl_usd
 ) TIMESTAMP(ts) PARTITION BY MONTH;
