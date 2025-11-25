@@ -35,6 +35,11 @@ def _update(date_str: str):
     - avg_px_usd: average price in USD
     - rpnl_usd: realized PnL = amt_signed * (mtm_price - avg_px_usd)
       where mtm_price is ask_px_0_usd if amt_signed < 0, otherwise bid_px_0_usd
+    - cum_amt: cumulative position (running sum of amt_signed)
+    - cum_volume_usd: cumulative notional value (cum_amt * mtm_price)
+    - prev_cum_volume_usd: previous bucket's cumulative notional value
+    - upnl_usd: unrealized PnL = (cum_volume_usd / prev_cum_volume_usd - 1) * prev_cum_volume_usd
+      (zero at inception bucket)
     """
     print(f"Processing PnL flow data for {date_str}")
 
@@ -65,82 +70,103 @@ def _update(date_str: str):
         conn.commit()
         print(f"Created temp_deals_1m with aggregated deals")
 
-    # Step 2: Insert into mart table using the temp table
-    insert_sql = f"""
-    INSERT INTO {MART_TABLE} (ts, instrument, amt_signed, avg_px, avg_px_usd, num_deals,
-                              ask_px_0, bid_px_0, ask_px_0_usd, bid_px_0_usd, rpnl_usd)
-    SELECT
-        dwu.ts,
-        dwu.instrument,
-        dwu.amt_signed,
-        dwu.avg_px,
-        dwu.avg_px_usd,
-        dwu.num_deals,
-        dwu.ask_px_0,
-        dwu.bid_px_0,
-        dwu.ask_px_0_usd,
-        dwu.bid_px_0_usd,
-        -- Calculate rpnl_usd: amt_signed * (mtm_price - avg_px_usd)
-        -- mtm_price = ask_px_0_usd if amt_signed < 0, otherwise bid_px_0_usd
-        dwu.amt_signed * (CASE WHEN dwu.amt_signed < 0 THEN dwu.ask_px_0_usd ELSE dwu.bid_px_0_usd END - dwu.avg_px_usd) AS rpnl_usd
-    FROM (
-        SELECT
-            dwf.ts,
-            dwf.instrument,
-            dwf.amt_signed,
-            dwf.avg_px,
-            dwf.num_deals,
-            dwf.ask_px_0,
-            dwf.bid_px_0,
-            -- Calculate USD conversion rates for ask and bid prices
-            CASE
-                -- No USD conversion needed (already in USD or no mapping)
-                WHEN dwf.usd_instrument IS NULL THEN dwf.ask_px_0
-                -- Inverted conversion (e.g., EUR/USD where we need 1/price)
-                WHEN dwf.is_inverted THEN dwf.ask_px_0 / u.bid_px_0
-                -- Direct conversion (e.g., BTC priced in EUR, multiply by EUR/USD)
-                ELSE dwf.ask_px_0 * u.ask_px_0
-            END AS ask_px_0_usd,
-            CASE
-                -- No USD conversion needed (already in USD or no mapping)
-                WHEN dwf.usd_instrument IS NULL THEN dwf.bid_px_0
-                -- Inverted conversion (e.g., EUR/USD where we need 1/price)
-                WHEN dwf.is_inverted THEN dwf.bid_px_0 / u.ask_px_0
-                -- Direct conversion (e.g., BTC priced in EUR, multiply by EUR/USD)
-                ELSE dwf.bid_px_0 * u.bid_px_0
-            END AS bid_px_0_usd,
-            -- Calculate avg_px in USD
-            CASE
-                -- No USD conversion needed (already in USD or no mapping)
-                WHEN dwf.usd_instrument IS NULL THEN dwf.avg_px
-                -- Inverted conversion (e.g., EUR/USD where we need 1/price)
-                WHEN dwf.is_inverted THEN dwf.avg_px / u.bid_px_0
-                -- Direct conversion (e.g., BTC priced in EUR, multiply by EUR/USD)
-                ELSE dwf.avg_px * u.ask_px_0
-            END AS avg_px_usd
-        FROM (
+    # Step 2: Create temp table with cumulative volume
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS temp_vol_calc;")
+
+        create_vol_sql = f"""
+        CREATE TABLE temp_vol_calc AS (
             SELECT
-                f.ts,
-                f.instrument,
-                f.ask_px_0,
-                f.bid_px_0,
-                COALESCE(d.net_amt, 0) AS amt_signed,
-                COALESCE(d.net_volume, 0) AS volume_signed,
-                d.avg_px,
-                COALESCE(d.num_deals, 0) AS num_deals,
-                -- Get USD conversion info
-                c.usd_instrument,
-                c.is_inverted
-            FROM {SOURCE_FEED_TABLE} f
-            LEFT JOIN temp_deals_1m d ON f.ts = d.ts_1m AND f.instrument = d.instrument
-            LEFT JOIN convmap_usd c
-                ON f.instrument = c.instrument
-            WHERE f.ts BETWEEN '{start_ts}' AND '{end_ts}'
-        ) dwf
-        LEFT JOIN {SOURCE_FEED_TABLE} u
-            ON dwf.usd_instrument = u.instrument AND dwf.ts = u.ts
-    ) dwu
-    ORDER BY dwu.ts
+                cum_calc.ts,
+                cum_calc.instrument,
+                cum_calc.amt_signed,
+                cum_calc.avg_px,
+                cum_calc.avg_px_usd,
+                cum_calc.num_deals,
+                cum_calc.ask_px_0,
+                cum_calc.bid_px_0,
+                cum_calc.ask_px_0_usd,
+                cum_calc.bid_px_0_usd,
+                cum_calc.cum_amt,
+                cum_calc.cum_amt * (CASE WHEN cum_calc.cum_amt < 0 THEN cum_calc.ask_px_0_usd ELSE cum_calc.bid_px_0_usd END) AS cum_volume_usd
+            FROM (
+                SELECT
+                    dwu.ts,
+                    dwu.instrument,
+                    dwu.amt_signed,
+                    dwu.avg_px,
+                    dwu.avg_px_usd,
+                    dwu.num_deals,
+                    dwu.ask_px_0,
+                    dwu.bid_px_0,
+                    dwu.ask_px_0_usd,
+                    dwu.bid_px_0_usd,
+                    SUM(dwu.amt_signed) OVER (PARTITION BY dwu.instrument ORDER BY dwu.ts) AS cum_amt
+                FROM (
+                    SELECT
+                        dwf.ts,
+                        dwf.instrument,
+                        dwf.amt_signed,
+                        dwf.avg_px,
+                        dwf.num_deals,
+                        dwf.ask_px_0,
+                        dwf.bid_px_0,
+                        CASE WHEN dwf.usd_instrument IS NULL THEN dwf.ask_px_0 WHEN dwf.is_inverted THEN dwf.ask_px_0 / u.bid_px_0 ELSE dwf.ask_px_0 * u.ask_px_0 END AS ask_px_0_usd,
+                        CASE WHEN dwf.usd_instrument IS NULL THEN dwf.bid_px_0 WHEN dwf.is_inverted THEN dwf.bid_px_0 / u.ask_px_0 ELSE dwf.bid_px_0 * u.bid_px_0 END AS bid_px_0_usd,
+                        CASE WHEN dwf.usd_instrument IS NULL THEN dwf.avg_px WHEN dwf.is_inverted THEN dwf.avg_px / u.bid_px_0 ELSE dwf.avg_px * u.ask_px_0 END AS avg_px_usd
+                    FROM (
+                        SELECT f.ts, f.instrument, f.ask_px_0, f.bid_px_0,
+                               COALESCE(d.net_amt, 0) AS amt_signed, d.avg_px, COALESCE(d.num_deals, 0) AS num_deals,
+                               c.usd_instrument, c.is_inverted
+                        FROM {SOURCE_FEED_TABLE} f
+                        LEFT JOIN temp_deals_1m d ON f.ts = d.ts_1m AND f.instrument = d.instrument
+                        LEFT JOIN convmap_usd c ON f.instrument = c.instrument
+                        WHERE f.ts BETWEEN '{start_ts}' AND '{end_ts}'
+                    ) dwf
+                    LEFT JOIN {SOURCE_FEED_TABLE} u ON dwf.usd_instrument = u.instrument AND dwf.ts = u.ts
+                ) dwu
+            ) cum_calc
+        );
+        """
+        cur.execute(create_vol_sql)
+        conn.commit()
+        print(f"Created temp_vol_calc with cumulative volume")
+
+    # Step 3: Create temp table with prev_cum_volume_usd using LAG
+    with _connect() as conn, conn.cursor() as cur:
+        cur.execute("DROP TABLE IF EXISTS temp_with_lag;")
+
+        create_lag_sql = f"""
+        CREATE TABLE temp_with_lag AS (
+            SELECT
+                ts, instrument, amt_signed, avg_px, avg_px_usd, num_deals,
+                ask_px_0, bid_px_0, ask_px_0_usd, bid_px_0_usd,
+                cum_amt, cum_volume_usd,
+                LAG(cum_volume_usd) OVER (PARTITION BY instrument ORDER BY ts) AS prev_cum_volume_usd
+            FROM temp_vol_calc
+        );
+        """
+        cur.execute(create_lag_sql)
+        conn.commit()
+        print(f"Created temp_with_lag with LAG calculation")
+
+    # Step 4: Insert into mart table
+    insert_sql = f"""
+    INSERT INTO {MART_TABLE} (ts, instrument, amt_signed, avg_px, avg_px_usd, volume_usd, num_deals,
+                              ask_px_0, bid_px_0, ask_px_0_usd, bid_px_0_usd, rpnl_usd,
+                              cum_amt, cum_volume_usd, prev_cum_volume_usd, upnl_usd)
+    SELECT
+        ts, instrument, amt_signed, avg_px, avg_px_usd,
+        amt_signed * avg_px_usd AS volume_usd,
+        num_deals,
+        ask_px_0, bid_px_0, ask_px_0_usd, bid_px_0_usd,
+        amt_signed * (CASE WHEN amt_signed < 0 THEN ask_px_0_usd ELSE bid_px_0_usd END - avg_px_usd) AS rpnl_usd,
+        cum_amt, cum_volume_usd, prev_cum_volume_usd,
+        CASE WHEN prev_cum_volume_usd IS NULL OR prev_cum_volume_usd = 0 THEN 0
+             ELSE (cum_volume_usd / prev_cum_volume_usd - 1) * prev_cum_volume_usd
+        END AS upnl_usd
+    FROM temp_with_lag
+    ORDER BY ts
     """
 
     with _connect() as conn, conn.cursor() as cur:
@@ -148,8 +174,10 @@ def _update(date_str: str):
         conn.commit()
         print(f"Inserted {cur.rowcount} rows into {MART_TABLE}")
 
-        # Clean up temp table
+        # Clean up temp tables
         cur.execute("DROP TABLE IF EXISTS temp_deals_1m;")
+        cur.execute("DROP TABLE IF EXISTS temp_vol_calc;")
+        cur.execute("DROP TABLE IF EXISTS temp_with_lag;")
         conn.commit()
 
     print(f"Updated {MART_TABLE} for date {date_str}")
