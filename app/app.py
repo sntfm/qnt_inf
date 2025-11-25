@@ -215,7 +215,8 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
                 rows=2, cols=1,
                 subplot_titles=('PnL Curves (USD)', 'Volume Curves (USD)'),
                 vertical_spacing=0.15,
-                specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]]
+                specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]],
+                shared_xaxes='all'
             )
             fig.update_layout(
                 margin=dict(l=40, r=20, t=80, b=40),
@@ -251,11 +252,13 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
 
         # Create figure with 2 subplots (panes)
         # Second subplot has secondary y-axis for num_deals
+        # shared_xaxes='all' synchronizes zooming and panning while keeping separate tick labels
         fig = make_subplots(
             rows=2, cols=1,
             subplot_titles=('PnL Curves (USD)', 'Volume Curves (USD)'),
             vertical_spacing=0.15,
-            specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]]
+            specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]],
+            shared_xaxes='all'
         )
 
         # === Pane 1: PnL curves ===
@@ -356,9 +359,9 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
             hovermode='x unified'
         )
 
-        # Update axes labels and synchronize x-axes
-        fig.update_xaxes(title_text="Time", row=2, col=1)
-        fig.update_xaxes(matches='x', row=1, col=1)  # Sync x-axis on row 1 with row 2
+        # Update axes labels and enable tick labels for both x-axes
+        fig.update_xaxes(title_text="", showticklabels=True, row=1, col=1)  # No label on upper x-axis
+        fig.update_xaxes(title_text="Time", showticklabels=True, row=2, col=1)
         fig.update_yaxes(title_text="PnL ($)", row=1, col=1)
         fig.update_yaxes(title_text="Volume ($)", row=2, col=1, secondary_y=False)
         fig.update_yaxes(title_text="# Deals", row=2, col=1, secondary_y=True)
@@ -386,7 +389,8 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
             rows=2, cols=1,
             subplot_titles=('PnL Curves (USD)', 'Volume Curves (USD)'),
             vertical_spacing=0.15,
-            specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]]
+            specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]],
+            shared_xaxes='all'
         )
         fig.update_layout(
             margin=dict(l=40, r=20, t=80, b=40),
