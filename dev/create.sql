@@ -55,3 +55,17 @@ CREATE TABLE feed_kraken_1s (
     ask_px_0 DOUBLE,
     bid_px_0 DOUBLE
 ) TIMESTAMP(ts) PARTITION BY MONTH;
+
+CREATE TABLE mart_pnl_flow (
+    ts TIMESTAMP,
+    instrument SYMBOL,
+    amt_signed DOUBLE,
+    avg_px DOUBLE,
+    avg_px_usd DOUBLE,
+    num_deals INT,
+    ask_px_0 DOUBLE,
+    bid_px_0 DOUBLE,
+    ask_px_0_usd DOUBLE,
+    bid_px_0_usd DOUBLE,
+    rpnl_usd DOUBLE
+) TIMESTAMP(ts) PARTITION BY MONTH;
