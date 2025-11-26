@@ -70,5 +70,11 @@ CREATE TABLE mart_pnl_flow (
     bid_px_0 DOUBLE,             -- market bid price at bucket time (native currency)
     ask_px_0_usd DOUBLE,         -- market ask price in USD
     bid_px_0_usd DOUBLE,         -- market bid price in USD
-    rpnl DOUBLE                  -- realized PnL in native currency: matched_amt * (wavg_sell_px - wavg_buy_px)
+    rpnl DOUBLE,                 -- realized PnL in native currency: matched_amt * (wavg_sell_px - wavg_buy_px)
+    rpnl_usd DOUBLE,             -- realized PnL in USD: rpnl * usd_conversion_rate
+    vol_usd DOUBLE,              -- volume in USD: amt_signed * (bid_px_0_usd if amt>0 else ask_px_0_usd)
+    cum_amt DOUBLE,              -- cumulative amount (running sum of amt_signed per instrument)
+    cum_vol_usd DOUBLE,          -- cumulative volume in USD (running sum of vol_usd per instrument)
+    upnl_usd DOUBLE,             -- unrealized PnL in USD: cum_amt * (exit_px_usd - abs(cum_vol_usd/cum_amt))
+    tpnl_usd DOUBLE              -- total PnL in USD: rpnl_usd + upnl_usd
 ) TIMESTAMP(ts) PARTITION BY MONTH;
