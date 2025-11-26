@@ -245,8 +245,8 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
             'upnl_usd': 'sum',
             'rpnl_usd': 'sum',
             'tpnl_usd': 'sum',
-            'volume_usd': 'sum',
-            'cum_volume_usd': 'sum',
+            'vol_usd': 'sum',
+            'cum_vol_usd': 'sum',
             'num_deals': 'sum'
         }).reset_index()
 
@@ -306,7 +306,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
         fig.add_trace(
             go.Scatter(
                 x=agg_df['ts'],
-                y=agg_df['volume_usd'],
+                y=agg_df['vol_usd'],
                 mode='lines',
                 name='Volume',
                 line=dict(color='#9b59b6', width=2),
@@ -319,7 +319,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
         fig.add_trace(
             go.Scatter(
                 x=agg_df['ts'],
-                y=agg_df['cum_volume_usd'],
+                y=agg_df['cum_vol_usd'],
                 mode='lines',
                 name='Cum. Volume',
                 line=dict(color='#f39c12', width=2),
@@ -373,7 +373,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
         total_pnl = agg_df['tpnl_usd'].iloc[-1] if len(agg_df) > 0 else 0
         total_upnl = agg_df['upnl_usd'].iloc[-1] if len(agg_df) > 0 else 0
         total_rpnl = agg_df['rpnl_usd'].sum()
-        total_volume = agg_df['volume_usd'].sum()
+        total_volume = agg_df['vol_usd'].sum()
         total_deals = int(agg_df['num_deals'].sum())
 
         instruments_str = f"{len(selected_instruments)} instruments" if selected_instruments else "All instruments"

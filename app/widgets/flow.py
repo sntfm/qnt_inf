@@ -2,10 +2,10 @@
 Flow widget for Dash app.
 
 Displays two panes:
-1. PNL curves: upnl_usd, rpnl_usd, total_pnl (upnl + rpnl)
-2. Volume curves: volume_usd, cum_volume_usd
+1. PNL curves: upnl_usd, rpnl_usd, tpnl_usd (total pnl)
+2. Volume curves: vol_usd, cum_vol_usd, num_deals
 
-Supports filtration by instrument.
+Supports filtration by instrument and datetime range.
 """
 
 from dash import html, dcc
@@ -122,10 +122,12 @@ def _fetch_flow_metrics(start_datetime: str, end_datetime: str, instruments: Lis
         DataFrame with columns:
         - ts: Timestamp (1-minute buckets)
         - instrument: Instrument name
-        - upnl_usd: Unrealized PnL
-        - rpnl_usd: Realized PnL
-        - volume_usd: Volume in USD
-        - cum_volume_usd: Cumulative volume in USD
+        - upnl_usd: Unrealized PnL in USD
+        - rpnl_usd: Realized PnL in USD
+        - tpnl_usd: Total PnL in USD
+        - vol_usd: Volume in USD per bucket
+        - cum_vol_usd: Cumulative volume in USD
+        - num_deals: Number of deals in bucket
     """
     # Parse datetime strings - support both date and datetime formats
     def parse_datetime(dt_str: str) -> datetime:
@@ -168,8 +170,8 @@ def _fetch_flow_metrics(start_datetime: str, end_datetime: str, instruments: Lis
             upnl_usd,
             rpnl_usd,
             tpnl_usd,
-            volume_usd,
-            cum_volume_usd,
+            vol_usd,
+            cum_vol_usd,
             num_deals
         FROM {FLOW_MART_TABLE}
         WHERE {where_clause}
@@ -193,8 +195,8 @@ def _fetch_flow_metrics(start_datetime: str, end_datetime: str, instruments: Lis
 def get_widget_layout(n_intervals):
     """
     Flow widget with two panes:
-    1. PNL curves (upnl_usd, rpnl_usd, total_pnl)
-    2. Volume curves (volume_usd, cum_volume_usd)
+    1. PNL curves (upnl_usd, rpnl_usd, tpnl_usd)
+    2. Volume curves (vol_usd, cum_vol_usd, num_deals)
 
     Args:
         n_intervals: Number of intervals (from dcc.Interval component)
