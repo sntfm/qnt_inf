@@ -356,15 +356,55 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
                 xanchor="right",
                 x=1
             ),
-            hovermode='x unified'
+            hovermode='x unified',  # Show unified hover across all subplots
+            hoverdistance=100,  # Distance to show hover
+            spikedistance=1000  # Distance to show spike lines
         )
 
         # Update axes labels and enable tick labels for both x-axes
-        fig.update_xaxes(title_text="", showticklabels=True, row=1, col=1)  # No label on upper x-axis
-        fig.update_xaxes(title_text="Time", showticklabels=True, row=2, col=1)
-        fig.update_yaxes(title_text="PnL ($)", row=1, col=1)
+        # Add spike lines to show vertical crosshair on both subplots
+        # matches='x' ensures spikes appear on all subplots sharing the x-axis
+
+        # X axis (pane 1)
+        fig.update_xaxes(
+            title_text="",
+            showticklabels=True,
+            matches='x',
+            showspikes=True,
+            spikemode='across',
+            spikesnap='cursor',
+            spikethickness=1,
+            spikecolor='rgba(0,0,0,0.3)',
+            row=1, col=1
+        )
+
+        # X axis (pane 2)
+        fig.update_xaxes(
+            title_text="Time",
+            showticklabels=True,
+            matches='x',
+            showspikes=True,
+            spikemode='across',
+            spikesnap='cursor',
+            spikethickness=1,
+            spikecolor='rgba(0,0,0,0.3)',
+            row=2, col=1
+        )
+
+        # Y axis (pane 2)
         fig.update_yaxes(title_text="Volume ($)", row=2, col=1, secondary_y=False)
-        fig.update_yaxes(title_text="# Deals", row=2, col=1, secondary_y=True)
+
+        # Y axis secondary (pane 2)
+        fig.update_yaxes(
+            title_text="# Deals",
+            showspikes=False,
+            spikemode='across',
+            spikesnap='cursor',
+            spikethickness=1,
+            spikecolor='rgba(0,0,0,0.3)',
+            secondary_y=True,
+            row=2, col=1
+        )
 
         # Add zero reference lines to PnL pane
         fig.add_hline(y=0, line_dash="dash", line_color="gray", opacity=0.5, row=1, col=1)
@@ -387,7 +427,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
 
         fig = make_subplots(
             rows=2, cols=1,
-            subplot_titles=('PnL Curves (USD)', 'Volume Curves (USD)'),
+            subplot_titles=('PnL (USD)', 'Inventory/Volume (USD)'),
             vertical_spacing=0.15,
             specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]],
             shared_xaxes='all'
