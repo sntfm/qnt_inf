@@ -59,19 +59,16 @@ CREATE TABLE feed_kraken_1s (
 CREATE TABLE mart_pnl_flow (
     ts TIMESTAMP,
     instrument SYMBOL,
-    amt_signed DOUBLE,
-    avg_px DOUBLE,
-    avg_px_usd DOUBLE,
-    volume_usd DOUBLE,           -- notional value of this bucket: amt_signed * avg_px_usd
-    num_deals INT,
-    ask_px_0 DOUBLE,
-    bid_px_0 DOUBLE,
-    ask_px_0_usd DOUBLE,
-    bid_px_0_usd DOUBLE,
-    rpnl_usd DOUBLE,
-    cum_amt DOUBLE,              -- cumulative position (running sum of amt_signed)
-    cum_volume_usd DOUBLE,       -- cumulative notional value: cum_amt * mtm_price
-    prev_cum_volume_usd DOUBLE,  -- previous bucket's cumulative notional value
-    upnl_usd DOUBLE,             -- unrealized PnL: (cum_volume_usd / prev_cum_volume_usd - 1) * prev_cum_volume_usd (zero at inception)
-    tpnl_usd DOUBLE              -- total PnL: rpnl_usd + upnl_usd
+    amt_signed DOUBLE,           -- net amount: buy_amt - sell_amt
+    buy_amt DOUBLE,              -- total buy amount in this bucket
+    sell_amt DOUBLE,             -- total sell amount in this bucket
+    matched_amt DOUBLE,          -- min(buy_amt, sell_amt) - portion that offsets within bucket
+    wavg_buy_px DOUBLE,          -- weighted average buy price (native currency)
+    wavg_sell_px DOUBLE,         -- weighted average sell price (native currency)
+    num_deals INT,               -- number of deals in this bucket
+    ask_px_0 DOUBLE,             -- market ask price at bucket time (native currency)
+    bid_px_0 DOUBLE,             -- market bid price at bucket time (native currency)
+    ask_px_0_usd DOUBLE,         -- market ask price in USD
+    bid_px_0_usd DOUBLE,         -- market bid price in USD
+    rpnl DOUBLE                  -- realized PnL in native currency: matched_amt * (wavg_sell_px - wavg_buy_px)
 ) TIMESTAMP(ts) PARTITION BY MONTH;
