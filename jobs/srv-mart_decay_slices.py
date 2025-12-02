@@ -22,7 +22,7 @@ QUESTDB_DB = os.getenv("QUESTDB_DB", "qdb")
 DEALS_TABLE = "mart_kraken_decay_deals"
 SLICES_TABLE = "mart_kraken_decay_slices"
 PRICES_TABLE = "feed_kraken_1s"
-CONVMAP_TABLE = "convmap_usd"
+CONVMAP_TABLE = "map_decomposition_usd"
 
 FRAME_MINS = 15
 
@@ -39,10 +39,10 @@ def _connect():
 
 
 def _fetch_convmap(cur) -> dict:
-    """Fetch USD conversion map: {instrument: (usd_instrument, is_inverted)}"""
-    cur.execute(f"SELECT instrument, usd_instrument, is_inverted FROM {CONVMAP_TABLE}")
+    """Fetch USD conversion map: {instrument: (instrument_usd, inst_usd_is_inverted)}"""
+    cur.execute(f"SELECT instrument, instrument_usd, inst_usd_is_inverted FROM {CONVMAP_TABLE}")
     rows = cur.fetchall()
-    return {row['instrument']: (row['usd_instrument'], row['is_inverted']) for row in rows}
+    return {row['instrument']: (row['instrument_usd'], row['inst_usd_is_inverted']) for row in rows}
 
 
 def _fetch_price_at(cur, instrument: str, timestamp: str):

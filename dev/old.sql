@@ -1,49 +1,3 @@
-import os
-import psycopg2
-
-# ---------------------------------------------------------------------------
-# QuestDB connection settings
-# ---------------------------------------------------------------------------
-QUESTDB_HOST = os.getenv("QUESTDB_HOST", "16.171.14.188")
-QUESTDB_PORT = int(os.getenv("QUESTDB_PG_PORT", "8812"))
-QUESTDB_USER = os.getenv("QUESTDB_USER", "admin")
-QUESTDB_PASSWORD = os.getenv("QUESTDB_PASSWORD", "quest")
-QUESTDB_DB = os.getenv("QUESTDB_DB", "qdb")
-
-SOURCE_DEALS_TABLE = os.getenv("PNL_FLOW_DEALS_TABLE", "deals")
-SOURCE_FEED_TABLE = os.getenv("PNL_FLOW_FEED_TABLE", "feed_kraken_1m")
-MART_TABLE = os.getenv("PNL_FLOW_MART_TABLE", "mart_pnl_flow")
-CONVMAP_TABLE = os.getenv("CONVMAP_TABLE", "convmap_usd")
-
-
-def _connect():
-    """Create a new psycopg2 connection to QuestDB's Postgres endpoint."""
-    return psycopg2.connect(
-        host=QUESTDB_HOST,
-        port=QUESTDB_PORT,
-        user=QUESTDB_USER,
-        password=QUESTDB_PASSWORD,
-        database=QUESTDB_DB,
-        connect_timeout=30,
-    )
-
-
-def _update(date_str: str):
-    """
-    Update mart_pnl_flow for a given date.
-
-    Implements:
-    ✔ Option A: cumulative sums across ALL historical data
-    ✔ No resets at midnight
-    ✔ Only insert rows belonging to target day
-    """
-
-    print(f"Processing PnL flow data for {date_str}")
-
-    date_start = f"{date_str}T00:00:00.000000Z"
-    date_end = f"{date_str}T23:59:59.999999Z"
-
-    insert_sql = f"""
 WITH
 -- ------------------------------------------------------------
 -- Load all feed rows up to end of target day
@@ -61,9 +15,9 @@ deals_buy AS (
     SELECT
         time AS ts_1m,
         instrument,
-        SUM(amt * px) / SUM(amt) AS px_buy_wavg,
-        SUM(amt) AS buy_amt,
-        COUNT(*) AS buy_count
+        SUM(amt * px) / SUM(amt) AS px_buy,
+        SUM(amt) AS amt_buy,
+        COUNT(*) AS cnt_buy
     FROM {SOURCE_DEALS_TABLE}
     WHERE side = 'BUY'
       AND time <= '{date_end}'
@@ -74,9 +28,9 @@ deals_sell AS (
     SELECT
         time AS ts_1m,
         instrument,
-        SUM(amt * px) / SUM(amt) AS px_sell_wavg,
-        SUM(amt) AS sell_amt,
-        COUNT(*) AS sell_count
+        SUM(amt * px) / SUM(amt) AS px_sell,
+        SUM(amt) AS amt_sell,
+        COUNT(*) AS cnt_sell
     FROM {SOURCE_DEALS_TABLE}
     WHERE side = 'SELL'
       AND time <= '{date_end}'
@@ -90,10 +44,10 @@ rd AS (
     SELECT
         COALESCE(b.ts_1m, s.ts_1m) AS ts_1m,
         COALESCE(b.instrument, s.instrument) AS instrument,
-        b.px_buy_wavg,
-        s.px_sell_wavg,
-        COALESCE(b.buy_amt, 0) AS buy_amt,
-        COALESCE(s.sell_amt, 0) AS sell_amt,
+        b.px_buy,
+        s.px_sell,
+        COALESCE(b.amt_buy, 0) AS amt_buy,
+        COALESCE(s.amt_sell, 0) AS amt_sell,
         COALESCE(b.buy_amt, 0) - COALESCE(s.sell_amt, 0) AS amt_filled,
         LEAST(COALESCE(b.buy_amt, 0), COALESCE(s.sell_amt, 0)) AS amt_matched,
         (COALESCE(s.px_sell_wavg, 0) - COALESCE(b.px_buy_wavg, 0))
@@ -112,6 +66,10 @@ base AS (
     SELECT
         f.ts AS ts,
         f.instrument,
+        c.instrument_base,
+        c.instrument_quote,
+        c.instrument_usd,
+        c.inst_usd_is_inverted,
         COALESCE(rd.amt_filled, 0) AS amt_signed,
         COALESCE(rd.buy_amt, 0) AS buy_amt,
         COALESCE(rd.sell_amt, 0) AS sell_amt,
@@ -119,19 +77,65 @@ base AS (
         rd.px_buy_wavg AS wavg_buy_px,
         rd.px_sell_wavg AS wavg_sell_px,
         COALESCE(rd.num_deals, 0) AS num_deals,
+
+        -- Effective execution price in native: use buy wavg for net buys, sell wavg for net sells
+        CASE
+            WHEN COALESCE(rd.amt_filled, 0) > 0 THEN rd.px_buy_wavg
+            WHEN COALESCE(rd.amt_filled, 0) < 0 THEN rd.px_sell_wavg
+            ELSE NULL
+        END AS px,
+
+        -- Decomposed execution prices for quote/base legs
+        CASE
+            -- Net long and non-inverted: px_quote = px / base ask
+            WHEN COALESCE(rd.amt_filled, 0) > 0 AND NOT c.inst_usd_is_inverted
+                THEN rd.px_buy_wavg / NULLIF(b.ask_px_0, 0)
+            -- Net long and inverted: px_quote = px / base ask
+            WHEN COALESCE(rd.amt_filled, 0) > 0 AND c.inst_usd_is_inverted
+                THEN rd.px_buy_wavg * NULLIF(b.ask_px_0, 0)
+            -- Net short and non-inverted: px_quote = px / base ask
+            WHEN COALESCE(rd.amt_filled, 0) < 0 AND NOT c.inst_usd_is_inverted
+                THEN rd.px_sell_wavg / NULLIF(b.ask_px_0, 0)
+            -- Net short and inverted: px_quote = px / base ask
+            WHEN COALESCE(rd.amt_filled, 0) < 0 AND c.inst_usd_is_inverted
+                THEN rd.px_sell_wavg * NULLIF(b.ask_px_0, 0)
+            ELSE NULL
+        END AS px_quote,
+
+        CASE
+            -- Net long and non-inverted: px_base = px / quote bid
+            WHEN COALESCE(rd.amt_filled, 0) > 0 AND NOT c.inst_usd_is_inverted
+                THEN rd.px_buy_wavg / NULLIF(q.bid_px_0, 0)
+            -- Net long and inverted: px_base = px / quote bid
+            WHEN COALESCE(rd.amt_filled, 0) > 0 AND c.inst_usd_is_inverted
+                THEN rd.px_buy_wavg * NULLIF(q.bid_px_0, 0)
+            -- Net short and inverted: px_base = px / quote bid
+            WHEN COALESCE(rd.amt_filled, 0) < 0 AND NOT c.inst_usd_is_inverted
+                THEN rd.px_sell_wavg / NULLIF(q.bid_px_0, 0)
+            -- Net short and inverted: px_base = px / quote bid
+            WHEN COALESCE(rd.amt_filled, 0) < 0 AND c.inst_usd_is_inverted
+                THEN rd.px_sell_wavg * NULLIF(q.bid_px_0, 0)
+            ELSE NULL
+        END AS px_base,
         f.ask_px_0,
         f.bid_px_0,
 
+        -- Base/quote leg prices (for decomposition debugging / analytics)
+        b.ask_px_0 AS base_ask_px_0,
+        b.bid_px_0 AS base_bid_px_0,
+        q.ask_px_0 AS quote_ask_px_0,
+        q.bid_px_0 AS quote_bid_px_0,
+
         -- ASK/BID converted to USD
         CASE
-            WHEN c.usd_instrument IS NULL THEN f.ask_px_0
-            WHEN c.is_inverted THEN f.ask_px_0 / u.bid_px_0
+            WHEN c.instrument_usd IS NULL THEN f.ask_px_0
+            WHEN c.inst_usd_is_inverted THEN f.ask_px_0 / u.bid_px_0
             ELSE f.ask_px_0 * u.ask_px_0
         END AS ask_px_0_usd,
 
         CASE
-            WHEN c.usd_instrument IS NULL THEN f.bid_px_0
-            WHEN c.is_inverted THEN f.bid_px_0 / u.ask_px_0
+            WHEN c.instrument_usd IS NULL THEN f.bid_px_0
+            WHEN c.inst_usd_is_inverted THEN f.bid_px_0 / u.ask_px_0
             ELSE f.bid_px_0 * u.bid_px_0
         END AS bid_px_0_usd,
 
@@ -139,21 +143,21 @@ base AS (
 
         -- Weighted average buy/sell prices converted to USD
         CASE
-            WHEN c.usd_instrument IS NULL THEN rd.px_buy_wavg
-            WHEN c.is_inverted THEN rd.px_buy_wavg / ((u.ask_px_0 + u.bid_px_0) / 2)
+            WHEN c.instrument_usd IS NULL THEN rd.px_buy_wavg
+            WHEN c.inst_usd_is_inverted THEN rd.px_buy_wavg / ((u.ask_px_0 + u.bid_px_0) / 2)
             ELSE rd.px_buy_wavg * ((u.ask_px_0 + u.bid_px_0) / 2)
         END AS wavg_buy_px_usd,
 
         CASE
-            WHEN c.usd_instrument IS NULL THEN rd.px_sell_wavg
-            WHEN c.is_inverted THEN rd.px_sell_wavg / ((u.ask_px_0 + u.bid_px_0) / 2)
+            WHEN c.instrument_usd IS NULL THEN rd.px_sell_wavg
+            WHEN c.inst_usd_is_inverted THEN rd.px_sell_wavg / ((u.ask_px_0 + u.bid_px_0) / 2)
             ELSE rd.px_sell_wavg * ((u.ask_px_0 + u.bid_px_0) / 2)
         END AS wavg_sell_px_usd,
 
         -- RPNL converted to USD
         CASE
-            WHEN c.usd_instrument IS NULL THEN rd.rpnl
-            WHEN c.is_inverted THEN rd.rpnl / ((u.ask_px_0 + u.bid_px_0) / 2)
+            WHEN c.instrument_usd IS NULL THEN rd.rpnl
+            WHEN c.inst_usd_is_inverted THEN rd.rpnl / ((u.ask_px_0 + u.bid_px_0) / 2)
             ELSE rd.rpnl * ((u.ask_px_0 + u.bid_px_0) / 2)
         END AS rpnl_usd,
 
@@ -161,14 +165,14 @@ base AS (
         CASE
             WHEN amt_filled < 0 THEN amt_filled *
                 (CASE
-                    WHEN c.usd_instrument IS NULL THEN f.ask_px_0
-                    WHEN c.is_inverted THEN f.ask_px_0 / u.bid_px_0
+                    WHEN c.instrument_usd IS NULL THEN f.ask_px_0
+                    WHEN c.inst_usd_is_inverted THEN f.ask_px_0 / u.bid_px_0
                     ELSE f.ask_px_0 * u.ask_px_0
                 END)
             ELSE amt_filled *
                 (CASE
-                    WHEN c.usd_instrument IS NULL THEN f.bid_px_0
-                    WHEN c.is_inverted THEN f.bid_px_0 / u.ask_px_0
+                    WHEN c.instrument_usd IS NULL THEN f.bid_px_0
+                    WHEN c.inst_usd_is_inverted THEN f.bid_px_0 / u.ask_px_0
                     ELSE f.bid_px_0 * u.bid_px_0
                 END)
         END AS vol_usd,
@@ -179,17 +183,17 @@ base AS (
         CASE
             WHEN rd.buy_amt > 0 AND rd.sell_amt > 0 THEN
                 -- Both buys and sells: cost = buys * buy_px - sells * sell_px
-                (rd.buy_amt * 
+                (rd.buy_amt *
                     CASE
-                        WHEN c.usd_instrument IS NULL THEN rd.px_buy_wavg
-                        WHEN c.is_inverted THEN rd.px_buy_wavg / ((u.ask_px_0 + u.bid_px_0) / 2)
+                        WHEN c.instrument_usd IS NULL THEN rd.px_buy_wavg
+                        WHEN c.inst_usd_is_inverted THEN rd.px_buy_wavg / ((u.ask_px_0 + u.bid_px_0) / 2)
                         ELSE rd.px_buy_wavg * ((u.ask_px_0 + u.bid_px_0) / 2)
                     END
                 ) -
                 (rd.sell_amt *
                     CASE
-                        WHEN c.usd_instrument IS NULL THEN rd.px_sell_wavg
-                        WHEN c.is_inverted THEN rd.px_sell_wavg / ((u.ask_px_0 + u.bid_px_0) / 2)
+                        WHEN c.instrument_usd IS NULL THEN rd.px_sell_wavg
+                        WHEN c.inst_usd_is_inverted THEN rd.px_sell_wavg / ((u.ask_px_0 + u.bid_px_0) / 2)
                         ELSE rd.px_sell_wavg * ((u.ask_px_0 + u.bid_px_0) / 2)
                     END
                 )
@@ -197,16 +201,16 @@ base AS (
                 -- Only buys
                 rd.buy_amt *
                     CASE
-                        WHEN c.usd_instrument IS NULL THEN rd.px_buy_wavg
-                        WHEN c.is_inverted THEN rd.px_buy_wavg / ((u.ask_px_0 + u.bid_px_0) / 2)
+                        WHEN c.instrument_usd IS NULL THEN rd.px_buy_wavg
+                        WHEN c.inst_usd_is_inverted THEN rd.px_buy_wavg / ((u.ask_px_0 + u.bid_px_0) / 2)
                         ELSE rd.px_buy_wavg * ((u.ask_px_0 + u.bid_px_0) / 2)
                     END
             WHEN rd.sell_amt > 0 THEN
                 -- Only sells (negative cost)
                 -(rd.sell_amt *
                     CASE
-                        WHEN c.usd_instrument IS NULL THEN rd.px_sell_wavg
-                        WHEN c.is_inverted THEN rd.px_sell_wavg / ((u.ask_px_0 + u.bid_px_0) / 2)
+                        WHEN c.instrument_usd IS NULL THEN rd.px_sell_wavg
+                        WHEN c.inst_usd_is_inverted THEN rd.px_sell_wavg / ((u.ask_px_0 + u.bid_px_0) / 2)
                         ELSE rd.px_sell_wavg * ((u.ask_px_0 + u.bid_px_0) / 2)
                     END
                 )
@@ -221,7 +225,13 @@ base AS (
         ON f.instrument = c.instrument
     LEFT JOIN {SOURCE_FEED_TABLE} u
         ON f.ts = u.ts
-       AND c.usd_instrument = u.instrument
+       AND c.instrument_usd = u.instrument
+    LEFT JOIN {SOURCE_FEED_TABLE} b
+        ON f.ts = b.ts
+       AND c.instrument_base = b.instrument
+    LEFT JOIN {SOURCE_FEED_TABLE} q
+        ON f.ts = q.ts
+       AND c.instrument_quote = q.instrument
 ),
 
 -- ------------------------------------------------------------
@@ -297,15 +307,23 @@ final AS (
     SELECT
         ts,
         instrument,
+        instrument_base,
+        instrument_quote,
+        instrument_usd,
         amt_signed,
         buy_amt,
         sell_amt,
         matched_amt,
         wavg_buy_px,
         wavg_sell_px,
+        px,
         num_deals,
         ask_px_0,
         bid_px_0,
+        base_ask_px_0,
+        base_bid_px_0,
+        quote_ask_px_0,
+        quote_bid_px_0,
         ask_px_0_usd,
         bid_px_0_usd,
         rpnl_native AS rpnl,
@@ -320,26 +338,55 @@ final AS (
             WHEN cum_amt = 0 THEN 0
             WHEN cum_amt > 0 THEN cum_amt * (bid_px_0_usd - (cum_cost_usd / cum_amt))
             ELSE cum_amt * (ask_px_0_usd - (cum_cost_usd / cum_amt))
-        END AS upnl_usd
+        END AS upnl_usd,
+
+        -- Unrealized PnL in base leg
+        CASE
+            WHEN cum_amt = 0 THEN 0
+            WHEN cum_amt > 0 THEN cum_amt * (base_bid_px_0 - px_base)
+            ELSE cum_amt * (base_ask_px_0 - px_base)
+        END AS upnl_base,
+
+        -- Unrealized PnL in quote leg
+        CASE
+            WHEN cum_amt = 0 THEN 0
+            WHEN cum_amt > 0 THEN cum_amt * (quote_bid_px_0 - px_quote)
+            ELSE cum_amt * (quote_ask_px_0 - px_quote)
+        END AS upnl_quote,
+
+        -- Total PnL in quote leg: realized (native) + unrealized in quote
+        (rpnl_native + 
+            CASE
+                WHEN cum_amt = 0 THEN 0
+                WHEN cum_amt > 0 THEN cum_amt * (quote_bid_px_0 - px_quote)
+                ELSE cum_amt * (quote_ask_px_0 - px_quote)
+            END
+        ) AS tpnl_quote
     FROM rpnl_calc
 )
 
--- ------------------------------------------------------------
 -- INSERT ONLY TARGET DAY RESULTS
 -- ------------------------------------------------------------
-INSERT INTO {MART_TABLE}
-SELECT
+INSERT INTO {MART_TABLE} (
     ts,
     instrument,
+    instrument_base,
+    instrument_quote,
+    instrument_usd,
     amt_signed,
     buy_amt,
     sell_amt,
     matched_amt,
     wavg_buy_px,
     wavg_sell_px,
+    px,
     num_deals,
     ask_px_0,
     bid_px_0,
+    base_ask_px_0,
+    base_bid_px_0,
+    quote_ask_px_0,
+    quote_bid_px_0,
     ask_px_0_usd,
     bid_px_0_usd,
     rpnl,
@@ -347,25 +394,47 @@ SELECT
     vol_usd,
     cum_amt,
     cum_vol_usd,
+    cum_rpnl_usd,
     upnl_usd,
-    cum_rpnl_usd + upnl_usd AS tpnl_usd
+    tpnl_usd,
+    upnl_base,
+    upnl_quote,
+    tpnl_quote
+)
+SELECT
+    ts,
+    instrument,
+    instrument_base,
+    instrument_quote,
+    instrument_usd,
+    amt_signed,
+    buy_amt,
+    sell_amt,
+    matched_amt,
+    wavg_buy_px,
+    wavg_sell_px,
+    px,
+    num_deals,
+    ask_px_0,
+    bid_px_0,
+    base_ask_px_0,
+    base_bid_px_0,
+    quote_ask_px_0,
+    quote_bid_px_0,
+    ask_px_0_usd,
+    bid_px_0_usd,
+    rpnl,
+    rpnl_usd,
+    vol_usd,
+    cum_amt,
+    cum_vol_usd,
+    cum_rpnl_usd,
+    upnl_usd,
+    cum_rpnl_usd + upnl_usd AS tpnl_usd,
+    upnl_base,
+    upnl_quote,
+    tpnl_quote
 FROM final
 WHERE ts BETWEEN '{date_start}' AND '{date_end}';
 
     """
-
-    with _connect() as conn, conn.cursor() as cur:
-        cur.execute(insert_sql)
-        conn.commit()
-
-    print(f"Updated {MART_TABLE} for date {date_str}")
-
-
-if __name__ == "__main__":
-    for date_str in [
-        "2025-10-20", "2025-10-21", "2025-10-22",
-        "2025-10-23", "2025-10-24", "2025-10-25",
-        "2025-10-26", "2025-10-27", "2025-10-28",
-        "2025-10-29", "2025-10-30"
-    ]:
-        _update(date_str)
