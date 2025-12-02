@@ -1,6 +1,7 @@
 import os
 import psycopg2
 import pandas as pd
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # QuestDB connection settings
@@ -82,8 +83,6 @@ rd AS (
         COALESCE(s.amt_sell, 0) AS amt_sell,
         COALESCE(b.amt_buy, 0) - COALESCE(s.amt_sell, 0) AS amt_filled,
         LEAST(COALESCE(b.amt_buy, 0), COALESCE(s.amt_sell, 0)) AS amt_matched,
-        (COALESCE(s.px_sell, 0) - COALESCE(b.px_buy, 0))
-            * LEAST(COALESCE(b.amt_buy, 0), COALESCE(s.amt_sell, 0)) AS rpnl,
         COALESCE(b.cnt_buy, 0) + COALESCE(s.cnt_sell, 0) AS num_deals
     FROM deals_buy b
     FULL OUTER JOIN deals_sell s
@@ -101,7 +100,7 @@ base AS (
         c.instrument_quote,
         c.instrument_usd,
         c.inst_usd_is_inverted,
-        COALESCE(rd.amt_filled, 0) AS amt_signed,
+        COALESCE(rd.amt_filled, 0) AS amt_filled,
         COALESCE(rd.amt_buy, 0) AS amt_buy,
         COALESCE(rd.amt_sell, 0) AS amt_sell,
         COALESCE(rd.amt_matched, 0) AS amt_matched,
@@ -147,6 +146,90 @@ SELECT * FROM base;
         df = pd.read_sql(insert_sql, conn)
 
     print(f"Retrieved {len(df)} rows for date {date_str}")
+######
+    # Effective execution price in native
+    df['px'] = np.where(
+        df['amt_filled'].fillna(0) > 0, 
+        df['px_buy'],
+        np.where(
+            df['amt_filled'].fillna(0) < 0,
+            df['px_sell'],
+            None
+        )
+    )
+
+
+    # px_quote: Decomposed execution price for quote leg
+    conditions_quote = [
+        # Net long and non-inverted: px / base ask
+        (df['amt_filled'].fillna(0) > 0) & (~df['inst_usd_is_inverted']),
+        # Net long and inverted: px * base ask
+        (df['amt_filled'].fillna(0) > 0) & (df['inst_usd_is_inverted']),
+        # Net short and non-inverted: px / base ask
+        (df['amt_filled'].fillna(0) < 0) & (~df['inst_usd_is_inverted']),
+        # Net short and inverted: px * base ask
+        (df['amt_filled'].fillna(0) < 0) & (df['inst_usd_is_inverted'])
+    ]
+
+    choices_quote = [
+        df['px_buy'] / df['px_ask_0_base'].replace(0, np.nan),
+        df['px_buy'] * df['px_ask_0_base'].replace(0, np.nan),
+        df['px_sell'] / df['px_ask_0_base'].replace(0, np.nan),
+        df['px_sell'] * df['px_ask_0_base'].replace(0, np.nan)
+    ]
+
+    df['px_quote'] = np.select(conditions_quote, choices_quote, default=None)
+
+    # px_base: Decomposed execution price for base leg
+    conditions_base = [
+        # Net long and non-inverted: px / quote bid
+        (df['amt_filled'].fillna(0) > 0) & (~df['inst_usd_is_inverted']),
+        # Net long and inverted: px * quote bid
+        (df['amt_filled'].fillna(0) > 0) & (df['inst_usd_is_inverted']),
+        # Net short and non-inverted: px / quote bid
+        (df['amt_filled'].fillna(0) < 0) & (~df['inst_usd_is_inverted']),
+        # Net short and inverted: px * quote bid
+        (df['amt_filled'].fillna(0) < 0) & (df['inst_usd_is_inverted'])
+    ]
+
+    choices_base = [
+        df['px_buy'] / df['px_bid_0_quote'].replace(0, np.nan),
+        df['px_buy'] * df['px_bid_0_quote'].replace(0, np.nan),
+        df['px_sell'] / df['px_bid_0_quote'].replace(0, np.nan),
+        df['px_sell'] * df['px_bid_0_quote'].replace(0, np.nan)
+    ]
+
+    df['px_base'] = np.select(conditions_base, choices_base, default=None)
+
+    # rpnl: Realized PnL from matched trades
+    # Only calculate when both px_sell and px_buy exist
+    df['rpnl'] = np.where(
+        df['px_sell'].notna() & df['px_buy'].notna(),
+        (df['px_sell'] - df['px_buy']) * df['amt_matched'],
+        0.0
+    )
+
+    # rpnl_usd: RPNL converted to USD
+    usd_mid = (df['px_ask_0_usd'] + df['px_bid_0_usd']) / 2
+
+    conditions_rpnl_usd = [
+        df['instrument_usd'].isna(),
+        df['inst_usd_is_inverted'],
+        ~df['inst_usd_is_inverted']
+    ]
+
+    choices_rpnl_usd = [
+        df['rpnl'],
+        df['rpnl'] / usd_mid,
+        df['rpnl'] * usd_mid
+    ]
+
+    df['rpnl_usd'] = np.select(conditions_rpnl_usd, choices_rpnl_usd, default=0.0)
+
+    # vol_usd: Volume in USD (signed exposure change)
+    df['vol_usd'] = df['amt_filled'] * df['px'] * (df['px_bid_0_usd']+df['px_ask_0_usd'])/2
+######
+
     return df
 
 if __name__ == "__main__":
@@ -158,5 +241,7 @@ if __name__ == "__main__":
     # ]:
     #     _update(date_str)
 
-    df = _update("2025-10-20")
-    print(df.head(10))
+    df = _update("2025-10-26")
+    print(df.columns)
+
+    print(df[df.px.notna()][['instrument', 'px_buy', 'px_sell', 'amt_buy', 'amt_sell', 'amt_matched', 'vol_usd', 'rpnl']].head(10))
