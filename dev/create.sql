@@ -50,39 +50,27 @@ CREATE TABLE feed_kraken_1s (
     bid_px_0 DOUBLE
 ) TIMESTAMP(ts) PARTITION BY MONTH;
 
-CREATE TABLE mart_pnl_flow (
+CREATE TABLE IF NOT EXISTS mart_pnl_flow (
     ts TIMESTAMP,
     instrument SYMBOL,
     instrument_base SYMBOL,
     instrument_quote SYMBOL,
-    instrument_usd SYMBOL,
-    amt_signed DOUBLE,           -- net amount: buy_amt - sell_amt
-    buy_amt DOUBLE,              -- total buy amount in this bucket
-    sell_amt DOUBLE,             -- total sell amount in this bucket
-    matched_amt DOUBLE,          -- min(buy_amt, sell_amt) - portion that offsets within bucket
-    wavg_buy_px DOUBLE,          -- weighted average buy price (native currency)
-    wavg_sell_px DOUBLE,         -- weighted average sell price (native currency)
-    px DOUBLE,                   -- effective execution price from deals (per bucket)
-    num_deals INT,               -- number of deals in this bucket
-    ask_px_0 DOUBLE,             -- market ask price at bucket time (native currency)
-    bid_px_0 DOUBLE,             -- market bid price at bucket time (native currency)
-    base_ask_px_0 DOUBLE,        -- base leg ask price at bucket time
-    base_bid_px_0 DOUBLE,        -- base leg bid price at bucket time
-    quote_ask_px_0 DOUBLE,       -- quote leg ask price at bucket time
-    quote_bid_px_0 DOUBLE,       -- quote leg bid price at bucket time
-    ask_px_0_usd DOUBLE,         -- market ask price in USD
-    bid_px_0_usd DOUBLE,         -- market bid price in USD
-    rpnl DOUBLE,                 -- realized PnL in native currency: matched_amt * (wavg_sell_px - wavg_buy_px)
-    rpnl_usd DOUBLE,             -- realized PnL in USD: rpnl * usd_conversion_rate
-    vol_usd DOUBLE,              -- volume in USD: amt_signed * (bid_px_0_usd if amt>0 else ask_px_0_usd)
-    cum_amt DOUBLE,              -- cumulative amount (running sum of amt_signed per instrument)
-    cum_vol_usd DOUBLE,          -- cumulative volume in USD (running sum of vol_usd per instrument)
-    upnl_usd DOUBLE,             -- unrealized PnL in USD: cum_amt * (exit_px_usd - abs(cum_vol_usd/cum_amt))
-    tpnl_usd DOUBLE,             -- total PnL in USD: rpnl_usd + upnl_usd
-    upnl_base DOUBLE,            -- unrealized PnL in base leg
-    upnl_quote DOUBLE,           -- unrealized PnL in quote leg
-    tpnl_quote DOUBLE            -- total PnL in quote leg: rpnl + upnl_quote
-) TIMESTAMP(ts) PARTITION BY MONTH;
+    amt_filled DOUBLE,
+    px DOUBLE,
+    px_quote DOUBLE,
+    px_base DOUBLE,
+    vol_usd DOUBLE,
+    num_deals INT,
+    cum_amt DOUBLE,
+    cum_cost_usd DOUBLE,
+    rpnl_usd_total DOUBLE,
+    cum_rpnl_usd DOUBLE,
+    upnl_usd DOUBLE,
+    upnl_base DOUBLE,
+    upnl_quote DOUBLE,
+    tpnl_usd DOUBLE,
+    tpnl_quote DOUBLE
+) TIMESTAMP(ts) PARTITION BY DAY;
 
 CREATE TABLE map_decomposition_usd (
     instrument SYMBOL,

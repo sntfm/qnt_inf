@@ -5,3 +5,4 @@ plotly
 flask
 questdb
 psycopg2-binary
+sqlalchemy
