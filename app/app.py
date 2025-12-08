@@ -213,7 +213,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
         if metrics_df.empty:
             fig = make_subplots(
                 rows=2, cols=1,
-                subplot_titles=('PnL Curves (USD)', 'Volume Curves (USD)'),
+                subplot_titles=('PnL Curves (USD)', 'Exposure/Cost Curves (USD)'),
                 vertical_spacing=0.15,
                 specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]],
                 shared_xaxes='all'
@@ -239,14 +239,15 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
 
         print(f"[DEBUG] Found {len(metrics_df)} data points")
 
-        # Group by timestamp and sum across all instruments (if multiple)
-        # This creates aggregate curves when multiple instruments are selected
+        # Group by timestamp and aggregate across all instruments (if multiple)
+        # When multiple instruments are selected, we sum their values at each timestamp
+        # to get the total portfolio metrics
         agg_df = metrics_df.groupby('ts').agg({
-            'upnl_usd': 'sum',
-            'rpnl_usd': 'sum',
-            'tpnl_usd': 'sum',
+            'upnl_usd': 'sum',  # Sum UPNL across all instruments at each timestamp
+            'rpnl_usd_total': 'sum',  # Sum per-bucket RPNL across instruments
+            'tpnl_usd': 'sum',  # Sum total PnL across all instruments at each timestamp
             'vol_usd': 'sum',
-            'cum_vol_usd': 'sum',
+            'cum_cost_usd': 'sum',
             'num_deals': 'sum'
         }).reset_index()
 
@@ -255,7 +256,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
         # shared_xaxes='all' synchronizes zooming and panning while keeping separate tick labels
         fig = make_subplots(
             rows=2, cols=1,
-            subplot_titles=('PnL Curves (USD)', 'Volume Curves (USD)'),
+            subplot_titles=('PnL Curves (USD)', 'Exposure/Cost Curves (USD)'),
             vertical_spacing=0.15,
             specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]],
             shared_xaxes='all'
@@ -275,11 +276,11 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
             row=1, col=1
         )
 
-        # Add RPNL trace
+        # Add RPNL trace (per bucket)
         fig.add_trace(
             go.Scatter(
                 x=agg_df['ts'],
-                y=agg_df['rpnl_usd'],
+                y=agg_df['rpnl_usd_total'],
                 mode='lines',
                 name='RPNL',
                 line=dict(color='#e74c3c', width=2),
@@ -315,15 +316,15 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
             row=2, col=1
         )
 
-        # Add Cumulative Volume trace
+        # Add Cumulative Cost trace
         fig.add_trace(
             go.Scatter(
                 x=agg_df['ts'],
-                y=agg_df['cum_vol_usd'],
+                y=agg_df['cum_cost_usd'],
                 mode='lines',
-                name='Cum. Volume',
+                name='Cum. Cost',
                 line=dict(color='#f39c12', width=2),
-                hovertemplate='<b>%{x}</b><br>Cum. Volume: $%{y:,.2f}<extra></extra>'
+                hovertemplate='<b>%{x}</b><br>Cum. Cost: $%{y:,.2f}<extra></extra>'
             ),
             row=2, col=1,
             secondary_y=False
@@ -392,7 +393,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
         )
 
         # Y axis (pane 2)
-        fig.update_yaxes(title_text="Volume ($)", row=2, col=1, secondary_y=False)
+        fig.update_yaxes(title_text="Volume/Cost ($)", row=2, col=1, secondary_y=False)
 
         # Y axis secondary (pane 2)
         fig.update_yaxes(
@@ -412,7 +413,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
         # Calculate summary stats
         total_pnl = agg_df['tpnl_usd'].iloc[-1] if len(agg_df) > 0 else 0
         total_upnl = agg_df['upnl_usd'].iloc[-1] if len(agg_df) > 0 else 0
-        total_rpnl = agg_df['rpnl_usd'].sum()
+        total_rpnl = agg_df['rpnl_usd_total'].sum()  # Sum of per-bucket RPNL
         total_volume = agg_df['vol_usd'].sum()
         total_deals = int(agg_df['num_deals'].sum())
 
@@ -427,7 +428,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
 
         fig = make_subplots(
             rows=2, cols=1,
-            subplot_titles=('PnL (USD)', 'Inventory/Volume (USD)'),
+            subplot_titles=('PnL Curves (USD)', 'Exposure/Cost Curves (USD)'),
             vertical_spacing=0.15,
             specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]],
             shared_xaxes='all'

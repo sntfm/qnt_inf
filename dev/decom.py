@@ -136,34 +136,81 @@ def write_to_questdb(decomposition_dict):
             params={'query': truncate_query},
             headers={'Accept': 'application/json'}
         )
-        
+
         if response.status_code != 200:
             print(f"Warning: Could not truncate table: {response.text}")
-        
+
         # Build INSERT statements
         insert_values = []
         for instrument, value in decomposition_dict.items():
             # Determine if it's a major pair
             is_major = (value is True)
-            
-            # For major pairs, base and quote are empty strings
+
+            # For major pairs, base and quote are NULL
             # For decomposed pairs, extract the base and quote instruments
             if is_major:
-                instrument_base = ""
-                instrument_quote = ""
+                instrument_base = None
+                instrument_quote = None
+                instrument_usd = None
+                inst_usd_is_inverted = False
             else:
                 # value is a tuple (base_major, quote_major)
-                instrument_base = value[0] if value[0] is not None else ""
-                instrument_quote = value[1] if value[1] is not None else ""
-            
-            # Escape single quotes in strings
+                instrument_base = value[0] if value[0] is not None else None
+                instrument_quote = value[1] if value[1] is not None else None
+
+                # Determine USD conversion instrument
+                # For pairs like ADA/BTC, we need BTC/USD for conversion
+                pair = instrument.split(".")[2].replace("_SPOT", "")
+                base, quote = pair.split("/")
+
+                # Check if quote currency has a USD pair
+                instrument_usd = usd_quote.get(quote, None)
+
+                # Determine if the USD conversion needs to be inverted
+                # The key question: Given our pair X/Y, if the reference is Y/USD,
+                # should we multiply or divide by Y/USD to get X in USD?
+                #
+                # Mathematical analysis:
+                #   X/Y = A (Y per X)
+                #   Y/USD = B (USD per Y)
+                #   To get X in USD: (X/Y) * (Y/USD) = A * B = USD per X
+                #   So we should MULTIPLY (NOT inverted)
+                #
+                # HOWEVER, if the reference pair naming is Y/USD but the actual
+                # price semantics in the feed data are inverted (USD/Y), then:
+                #   X/Y = A (Y per X)
+                #   "Y/USD" feed = B (actually Y per USD, not USD per Y!)
+                #   To get X in USD: (X/Y) / (Y/USD) = A / B = USD per X
+                #   So we should DIVIDE (IS inverted)
+                #
+                # Based on the bug report: GBP pairs need division, not multiplication
+                # This means GBP/USD feed contains GBP per USD, not USD per GBP
+                # Similarly for EUR and CHF pairs with fiat quote currencies
+                #
+                # Rule: Fiat quote currencies (GBP, EUR, CHF) have inverted USD pairs
+                # Crypto quote currencies (BTC, ETH) have normal USD pairs
+                if instrument_usd:
+                    fiat_currencies = {"GBP", "EUR", "CHF"}
+                    inst_usd_is_inverted = (quote in fiat_currencies)
+                else:
+                    inst_usd_is_inverted = False
+
+            # Escape single quotes in strings and format for SQL
             instrument_esc = instrument.replace("'", "''")
-            instrument_base_esc = instrument_base.replace("'", "''")
-            instrument_quote_esc = instrument_quote.replace("'", "''")
-            
+
+            # Format string fields: None -> NULL, string -> 'string'
+            def format_sql_string(value):
+                if value is None:
+                    return "NULL"
+                return f"'{value.replace(chr(39), chr(39)*2)}'"
+
+            instrument_base_sql = format_sql_string(instrument_base)
+            instrument_quote_sql = format_sql_string(instrument_quote)
+            instrument_usd_sql = format_sql_string(instrument_usd)
+
             # Build the VALUES clause
             insert_values.append(
-                f"('{instrument_esc}', {str(is_major).lower()}, '{instrument_base_esc}', '{instrument_quote_esc}')"
+                f"('{instrument_esc}', {str(is_major).lower()}, {instrument_base_sql}, {instrument_quote_sql}, {instrument_usd_sql}, {str(inst_usd_is_inverted).lower()})"
             )
         
         # Execute INSERT in batches (QuestDB can handle large queries, but let's be safe)
@@ -172,7 +219,7 @@ def write_to_questdb(decomposition_dict):
         
         for i in range(0, len(insert_values), batch_size):
             batch = insert_values[i:i+batch_size]
-            insert_query = f"INSERT INTO {TABLE_NAME} (instrument, is_major, instrument_base, instrument_quote) VALUES {', '.join(batch)};"
+            insert_query = f"INSERT INTO {TABLE_NAME} (instrument, is_major, instrument_base, instrument_quote, instrument_usd, inst_usd_is_inverted) VALUES {', '.join(batch)};"
             
             response = requests.get(
                 f"http://{QUESTDB_HOST}:{QUESTDB_PORT_HTTP}/exec",

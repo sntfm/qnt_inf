@@ -8,6 +8,8 @@ from questdb.ingress import Sender, IngressError, TimestampNanos
 pd.set_option('display.max_columns', None)  # Show all columns
 pd.set_option('display.width', None)  # Auto-detect width
 pd.set_option('display.max_colwidth', None)  # No truncation of column values
+pd.set_option('display.expand_frame_repr', False)  # Prevent wrapping
+pd.set_option('display.max_rows', 100)  # Increase if needed
 
 # ---------------------------------------------------------------------------
 # QuestDB connection settings
@@ -38,14 +40,19 @@ def _process(date_str: str):
 
     insert_sql = f"""
 WITH
--- Load all feed rows up to end of target day
+-- Load all feed rows for the target day range only
 feed_all AS (
-    SELECT *
+    SELECT DISTINCT
+        ts,
+        instrument,
+        bid_px_0,
+        ask_px_0
     FROM {SOURCE_FEED_TABLE}
-    WHERE ts <= '{date_end}'
+    WHERE ts >= '{date_start}'
+      AND ts <= '{date_end}'
 ),
 
--- Bucket deals to 1min
+-- Bucket deals to 1min for the target day
 deals_buy AS (
     SELECT
         time AS ts_1m,
@@ -55,6 +62,7 @@ deals_buy AS (
         COUNT(*) AS cnt_buy
     FROM {SOURCE_DEALS_TABLE}
     WHERE side = 'BUY'
+      AND time >= '{date_start}'
       AND time <= '{date_end}'
     SAMPLE BY 1m ALIGN TO CALENDAR
 ),
@@ -68,6 +76,7 @@ deals_sell AS (
         COUNT(*) AS cnt_sell
     FROM {SOURCE_DEALS_TABLE}
     WHERE side = 'SELL'
+      AND time >= '{date_start}'
       AND time <= '{date_end}'
     SAMPLE BY 1m ALIGN TO CALENDAR
 ),
@@ -90,6 +99,18 @@ rd AS (
        AND b.instrument = s.instrument
 ),
 
+-- Deduplicated conversion map (in case there are duplicates)
+convmap AS (
+    SELECT DISTINCT
+        instrument,
+        is_major,
+        instrument_base,
+        instrument_quote,
+        instrument_usd,
+        inst_usd_is_inverted
+    FROM {CONVMAP_TABLE}
+),
+
 -- Join FEED + DEALS + FX conversion
 base AS (
     SELECT
@@ -107,6 +128,9 @@ base AS (
         COALESCE(rd.px_buy, 0) AS px_buy,
         COALESCE(rd.px_sell, 0) AS px_sell,
         COALESCE(rd.num_deals, 0) AS num_deals,
+        -- Instrument's own native bid/ask prices
+        f.bid_px_0 AS px_bid_0,
+        f.ask_px_0 AS px_ask_0,
         -- Base instrument prices
         b.bid_px_0 AS px_bid_0_base,
         b.ask_px_0 AS px_ask_0_base,
@@ -120,27 +144,22 @@ base AS (
     LEFT JOIN rd
         ON f.ts = rd.ts_1m
        AND f.instrument = rd.instrument
-    LEFT JOIN {CONVMAP_TABLE} c
+    LEFT JOIN convmap c
         ON f.instrument = c.instrument
-    LEFT JOIN {SOURCE_FEED_TABLE} u
+    LEFT JOIN feed_all u
         ON f.ts = u.ts
        AND c.instrument_usd = u.instrument
-    LEFT JOIN {SOURCE_FEED_TABLE} b
+    LEFT JOIN feed_all b
         ON f.ts = b.ts
        AND c.instrument_base = b.instrument
-    LEFT JOIN {SOURCE_FEED_TABLE} q
+    LEFT JOIN feed_all q
         ON f.ts = q.ts
        AND c.instrument_quote = q.instrument
 )
 
 SELECT * FROM base;
     """
-    # # print(insert_sql)
-    # with _connect() as conn, conn.cursor() as cur:
-    #     cur.execute(insert_sql)
-    #     conn.commit()
 
-    # print(f"Updated {MART_TABLE} for date {date_str}")
 
     engine = _connect()
     df = pd.read_sql(insert_sql, engine)
@@ -148,134 +167,92 @@ SELECT * FROM base;
 
     print(f"Retrieved {len(df)} rows for date {date_str}")
 
-    # Effective execution price in native
-    df['px'] = np.where(
-        df['amt_filled'].fillna(0) > 0, 
-        df['px_buy'],
-        np.where(
-            df['amt_filled'].fillna(0) < 0,
-            df['px_sell'],
-            None
-        )
-    )
+    # Initialize columns
+    df['px_base'] = np.nan
+    df['px_quote'] = np.nan
+    df['rpnl_intra'] = 0.0
+    df['rpnl_intra_usd'] = 0.0
+    df['vol_usd'] = 0.0
 
+# Precompute 
+    amt = df['amt_filled'].fillna(0)
+    long = amt > 0
+    short = amt < 0
+    inv = df['inst_usd_is_inverted']
+    has_usd   = df['instrument_usd'].notna()
+    
+# Column PX
+    df['px'] = np.where(amt > 0, df['px_buy'], np.where(amt < 0, df['px_sell'], np.nan))
 
-    # px_quote: Decomposed execution price for quote leg
-    conditions_quote = [
-        # Net long and non-inverted: px / base ask
-        (df['amt_filled'].fillna(0) > 0) & (~df['inst_usd_is_inverted']),
-        # Net long and inverted: px * base ask
-        (df['amt_filled'].fillna(0) > 0) & (df['inst_usd_is_inverted']),
-        # Net short and non-inverted: px / base ask
-        (df['amt_filled'].fillna(0) < 0) & (~df['inst_usd_is_inverted']),
-        # Net short and inverted: px * base ask
-        (df['amt_filled'].fillna(0) < 0) & (df['inst_usd_is_inverted'])
-    ]
+# Column PX_BASE - calculate from quote reference prices
+    ask_q = df['px_ask_0_quote'].replace(0, np.nan)
+    bid_q = df['px_bid_0_quote'].replace(0, np.nan)
 
-    choices_quote = [
-        df['px_buy'] / df['px_ask_0_base'].replace(0, np.nan),
-        df['px_buy'] * df['px_ask_0_base'].replace(0, np.nan),
-        df['px_sell'] / df['px_ask_0_base'].replace(0, np.nan),
-        df['px_sell'] * df['px_ask_0_base'].replace(0, np.nan)
-    ]
+    df.loc[long & ~inv, 'px_base']  = df['px_buy'] / bid_q
+    df.loc[long &  inv, 'px_base']  = df['px_buy'] * bid_q
+    df.loc[short & ~inv, 'px_base'] = df['px_sell'] / ask_q
+    df.loc[short &  inv, 'px_base'] = df['px_sell'] * ask_q
 
-    df['px_quote'] = np.select(conditions_quote, choices_quote, default=None)
+# Column PX_QUOTE - derive from reference px
+    df.loc[~inv, 'px_quote'] = df['px'] / df['px_base']
+    df.loc[inv, 'px_quote']  = df['px_base'] / df['px']
 
-    # px_base: Decomposed execution price for base leg
-    conditions_base = [
-        # Net long and non-inverted: px / quote bid
-        (df['amt_filled'].fillna(0) > 0) & (~df['inst_usd_is_inverted']),
-        # Net long and inverted: px * quote bid
-        (df['amt_filled'].fillna(0) > 0) & (df['inst_usd_is_inverted']),
-        # Net short and non-inverted: px / quote bid
-        (df['amt_filled'].fillna(0) < 0) & (~df['inst_usd_is_inverted']),
-        # Net short and inverted: px * quote bid
-        (df['amt_filled'].fillna(0) < 0) & (df['inst_usd_is_inverted'])
-    ]
+# Column RPNL_INTRA
+    mask = df['px_sell'].notna() & df['px_buy'].notna()
+    df.loc[mask, 'rpnl_intra'] = ((df['px_sell'] - df['px_buy']) * df['amt_matched'])
 
-    choices_base = [
-        df['px_buy'] / df['px_bid_0_quote'].replace(0, np.nan),
-        df['px_buy'] * df['px_bid_0_quote'].replace(0, np.nan),
-        df['px_sell'] / df['px_bid_0_quote'].replace(0, np.nan),
-        df['px_sell'] * df['px_bid_0_quote'].replace(0, np.nan)
-    ]
+# Column RPNL_INTRA_USD
+    usd_bid = df['px_bid_0_usd'].replace(0, np.nan)
+    usd_ask = df['px_ask_0_usd'].replace(0, np.nan)
 
-    df['px_base'] = np.select(conditions_base, choices_base, default=None)
+    usd_bid = usd_bid.groupby(df['instrument']).ffill()
+    usd_ask = usd_ask.groupby(df['instrument']).ffill()
 
-    # rpnl: Realized PnL from matched trades
-    # Only calculate when both px_sell and px_buy exist
-    df['rpnl'] = np.where(
-        df['px_sell'].notna() & df['px_buy'].notna(),
-        (df['px_sell'] - df['px_buy']) * df['amt_matched'],
-        0.0
-    )
+    df['rpnl_usd'] = df['rpnl_intra'].copy()
 
-    # rpnl_usd: RPNL converted to USD
-    usd_mid = ((df['px_ask_0_usd'].fillna(0) + df['px_bid_0_usd'].fillna(0)) / 2).replace(0, np.nan)
+    positive = df['rpnl_intra'] > 0
+    negative = df['rpnl_intra'] < 0
 
-    conditions_rpnl_usd = [
-        df['instrument_usd'].isna(),
-        df['inst_usd_is_inverted'],
-        ~df['inst_usd_is_inverted']
-    ]
+    df.loc[has_usd & ~inv & positive, 'rpnl_usd'] = df['rpnl_intra'] * usd_bid
+    df.loc[has_usd & ~inv & negative, 'rpnl_usd'] = df['rpnl_intra'] * usd_ask
+    df.loc[has_usd &  inv & positive, 'rpnl_usd'] = df['rpnl_intra'] / usd_bid
+    df.loc[has_usd &  inv & negative, 'rpnl_usd'] = df['rpnl_intra'] / usd_ask
 
-    choices_rpnl_usd = [
-        df['rpnl'],
-        df['rpnl'] / usd_mid,
-        df['rpnl'] * usd_mid
-    ]
+    df['rpnl_usd'] = df['rpnl_usd'].astype(float)
 
-    df['rpnl_usd'] = np.select(conditions_rpnl_usd, choices_rpnl_usd, default=0.0).astype(float)
+# Column VOL_USD
+    usd_mid = ((df['px_ask_0_usd'].fillna(0) + df['px_bid_0_usd'].fillna(0)) / 2)
+    usd_mid = usd_mid.replace(0, np.nan)
 
-    # vol_usd: Volume in USD (signed exposure change)
-    # Need to convert native price (px) to USD, accounting for inverted instruments
-    conditions_vol_usd = [
-        df['instrument_usd'].isna(),
-        df['inst_usd_is_inverted'],
-        ~df['inst_usd_is_inverted']
-    ]
+    usd_mid = usd_mid.groupby(df['instrument']).ffill()
 
-    choices_vol_usd = [
-        df['amt_filled'] * df['px'],  # Already in USD
-        df['amt_filled'] * df['px'] / usd_mid,  # Inverted: divide
-        df['amt_filled'] * df['px'] * usd_mid   # Non-inverted: multiply
-    ]
+    native_vol = df['amt_filled'] * df['px']
+    df['vol_usd'] = native_vol  # default: already USD when instrument_usd is NaN
 
-    df['vol_usd'] = np.select(conditions_vol_usd, choices_vol_usd, default=0.0).astype(float)
+    df.loc[has_usd & ~inv, 'vol_usd'] = native_vol * usd_mid
+    df.loc[has_usd &  inv, 'vol_usd'] = native_vol / usd_mid
 
-    # cost_signed_usd: Cost basis using actual fill prices
-    # Convert px_buy and px_sell to USD first
-    px_buy_usd = np.select(
-        [df['instrument_usd'].isna(), df['inst_usd_is_inverted'], ~df['inst_usd_is_inverted']],
-        [df['px_buy'], df['px_buy'] / usd_mid, df['px_buy'] * usd_mid],
-        default=np.nan
-    )
+    df['vol_usd'] = df['vol_usd'].astype(float)
 
-    px_sell_usd = np.select(
-        [df['instrument_usd'].isna(), df['inst_usd_is_inverted'], ~df['inst_usd_is_inverted']],
-        [df['px_sell'], df['px_sell'] / usd_mid, df['px_sell'] * usd_mid],
-        default=np.nan
-    )
+# Column COST_SIGNED_USD
+    px_buy_usd = df['px_buy'].copy()
+    px_sell_usd = df['px_sell'].copy()
 
-    # Calculate cost_signed_usd based on whether we have buys, sells, or both
-    cost_conditions = [
-        (df['amt_buy'] > 0) & (df['amt_sell'] > 0),  # Both buys and sells
-        (df['amt_buy'] > 0) & (df['amt_sell'] == 0),  # Only buys
-        (df['amt_buy'] == 0) & (df['amt_sell'] > 0)   # Only sells
-    ]
+    # Convert buy prices
+    px_buy_usd[has_usd & inv] = df['px_buy'][has_usd & inv] / usd_bid[has_usd & inv]
+    px_buy_usd[has_usd & ~inv] = df['px_buy'][has_usd & ~inv] * usd_bid[has_usd & ~inv]
 
-    cost_choices = [
-        # Both: cost = buys * buy_px_usd - sells * sell_px_usd
-        (df['amt_buy'] * px_buy_usd) - (df['amt_sell'] * px_sell_usd),
-        # Only buys
-        df['amt_buy'] * px_buy_usd,
-        # Only sells (negative cost)
-        -(df['amt_sell'] * px_sell_usd)
-    ]
+    # Convert sell prices
+    px_sell_usd[has_usd & inv] = df['px_sell'][has_usd & inv] / usd_ask[has_usd & inv]
+    px_sell_usd[has_usd & ~inv] = df['px_sell'][has_usd & ~inv] * usd_ask[has_usd & ~inv]
 
-    df['cost_signed_usd'] = np.select(cost_conditions, cost_choices, default=0.0).astype(float)
+    # Compute signed cost
+    df['cost_signed_usd'] = df['amt_buy'] * px_buy_usd - df['amt_sell'] * px_sell_usd
 
-    # Cumulative calculations: running sums per instrument
+    # Default zero where both buy and sell are zero
+    df['cost_signed_usd'] = df['cost_signed_usd'].fillna(0.0).astype(float)
+
+#### Cumulative calculations: running sums per instrument
     df = df.sort_values(['instrument', 'ts'])
     df['cum_amt'] = df.groupby('instrument')['amt_filled'].cumsum()
     df['cum_cost_usd'] = df.groupby('instrument')['cost_signed_usd'].cumsum()
@@ -284,98 +261,94 @@ SELECT * FROM base;
     df['prev_cum_amt'] = df.groupby('instrument')['cum_amt'].shift(1)
     df['prev_cum_cost_usd'] = df.groupby('instrument')['cum_cost_usd'].shift(1)
 
-    # Compute realized PnL from reductions & flips
-    # Helper function to calculate avg cost
+    # Average cost from previous position
     avg_cost = df['prev_cum_cost_usd'] / df['prev_cum_amt']
 
+# Instrument bid/ask in USD
+    df['instrument_bid_usd'] = np.nan
+    df['instrument_ask_usd'] = np.nan
+
+    no_usd = df['instrument_usd'].isna()
+
+    df.loc[no_usd, 'instrument_bid_usd'] = df['px_bid_0']
+    df.loc[no_usd, 'instrument_ask_usd'] = df['px_ask_0']
+    df.loc[has_usd & inv, 'instrument_bid_usd'] = df['px_bid_0'] / usd_mid
+    df.loc[has_usd & inv, 'instrument_ask_usd'] = df['px_ask_0'] / usd_mid
+    df.loc[has_usd & ~inv, 'instrument_bid_usd'] = df['px_bid_0'] * usd_mid
+    df.loc[has_usd & ~inv, 'instrument_ask_usd'] = df['px_ask_0'] * usd_mid
+
+    # Forward-fill NaN values per instrument
+    df['instrument_bid_usd'] = df.groupby('instrument')['instrument_bid_usd'].ffill()
+    df['instrument_ask_usd'] = df.groupby('instrument')['instrument_ask_usd'].ffill()
+
+    instrument_bid_usd = df['instrument_bid_usd']
+    instrument_ask_usd = df['instrument_ask_usd']
+
+# Column RPNL_USD_TOTAL - realized PnL from position reductions/flips
+    df['rpnl_usd_total'] = df['rpnl_usd'].copy()
+
+    # Precompute position conditions
+    prev_long = df['prev_cum_amt'] > 0
+    prev_short = df['prev_cum_amt'] < 0
+    prev_flat = df['prev_cum_amt'].isna() | (df['prev_cum_amt'] == 0)
+
+    curr_long = df['cum_amt'] > 0
+    curr_short = df['cum_amt'] < 0
+    curr_flat = df['cum_amt'] == 0
+
+    # Position closed or flipped
+    closed_or_flipped = curr_flat | ((prev_long & curr_short) | (prev_short & curr_long))
+
+    # Position reduced (same sign, smaller absolute value)
+    reduced = ((prev_long & curr_long) | (prev_short & curr_short)) & (np.abs(df['cum_amt']) < np.abs(df['prev_cum_amt']))
+
     # Market price to use for closing positions
-    market_px_usd = np.where(
-        df['prev_cum_amt'] > 0,
-        df['px_bid_0_usd'],  # Long positions use bid
-        df['px_ask_0_usd']   # Short positions use ask
+    market_px_usd = np.where(prev_long, instrument_bid_usd, instrument_ask_usd)
+
+    # Closed/flipped: realize entire previous position
+    df.loc[closed_or_flipped & ~prev_flat, 'rpnl_usd_total'] = (
+        df['rpnl_usd'] + df['prev_cum_amt'] * (market_px_usd - avg_cost)
     )
 
-    # Realized PnL conditions
-    rpnl_total_conditions = [
-        # First row or prev position was flat: only bucket rpnl
-        df['prev_cum_amt'].isna() | (df['prev_cum_amt'] == 0),
-
-        # Position closed to zero or flipped sign
-        (df['cum_amt'] == 0) | (np.sign(df['prev_cum_amt']) != np.sign(df['cum_amt'])),
-
-        # Position reduced (same sign, smaller absolute value)
-        (np.sign(df['prev_cum_amt']) == np.sign(df['cum_amt'])) & (np.abs(df['cum_amt']) < np.abs(df['prev_cum_amt']))
-    ]
-
-    rpnl_total_choices = [
-        # Only bucket rpnl
-        df['rpnl_usd'],
-
-        # Closed/flipped: realize entire prev position
-        df['rpnl_usd'] + df['prev_cum_amt'] * (market_px_usd - avg_cost),
-
-        # Reduced: realize the reduction
+    # Reduced: realize the reduction
+    df.loc[reduced, 'rpnl_usd_total'] = (
         df['rpnl_usd'] + (df['prev_cum_amt'] - df['cum_amt']) * (market_px_usd - avg_cost)
-    ]
+    )
 
-    df['rpnl_usd_total'] = np.select(rpnl_total_conditions, rpnl_total_choices, default=df['rpnl_usd']).astype(float)
+    df['rpnl_usd_total'] = df['rpnl_usd_total'].astype(float)
 
-    # Cumulative volume and realized PnL
+# Column CUM_VOL_USD, CUM_RPNL_USD
     df['cum_vol_usd'] = df.groupby('instrument')['vol_usd'].cumsum()
     df['cum_rpnl_usd'] = df.groupby('instrument')['rpnl_usd_total'].cumsum()
 
-    # Unrealized PnL: current position valued at market price minus cost basis
-    avg_cost_current = df['cum_cost_usd'] / df['cum_amt']
-
-    upnl_usd_conditions = [
-        df['cum_amt'] == 0,
-        df['cum_amt'] > 0,
-        df['cum_amt'] < 0
-    ]
-
-    upnl_usd_choices = [
+# Column UPNL_USD - unrealized PnL in USD
+    # Average cost of current position (handle division by zero)
+    avg_cost_current = np.where(
+        np.abs(df['cum_amt']) < 1e-10,
         0,
-        df['cum_amt'] * (df['px_bid_0_usd'] - avg_cost_current),
-        df['cum_amt'] * (df['px_ask_0_usd'] - avg_cost_current)
-    ]
+        df['cum_cost_usd'] / df['cum_amt']
+    )
 
-    df['upnl_usd'] = np.select(upnl_usd_conditions, upnl_usd_choices, default=0.0).astype(float)
+    df['upnl_usd'] = 0.0
+    df.loc[curr_long, 'upnl_usd'] = df['cum_amt'] * (instrument_bid_usd - avg_cost_current)
+    df.loc[curr_short, 'upnl_usd'] = df['cum_amt'] * (instrument_ask_usd - avg_cost_current)
+    df['upnl_usd'] = df['upnl_usd'].astype(float)
 
-    # Unrealized PnL in base leg
-    upnl_base_conditions = [
-        df['cum_amt'] == 0,
-        df['cum_amt'] > 0,
-        df['cum_amt'] < 0
-    ]
+# Column UPNL_BASE - unrealized PnL in base leg
+    df['upnl_base'] = 0.0
+    df.loc[curr_long, 'upnl_base'] = df['cum_amt'] * (df['px_bid_0_base'] - df['px_base'])
+    df.loc[curr_short, 'upnl_base'] = df['cum_amt'] * (df['px_ask_0_base'] - df['px_base'])
+    df['upnl_base'] = df['upnl_base'].astype(float)
 
-    upnl_base_choices = [
-        0,
-        df['cum_amt'] * (df['px_bid_0_base'] - df['px_base']),
-        df['cum_amt'] * (df['px_ask_0_base'] - df['px_base'])
-    ]
+# Column UPNL_QUOTE - unrealized PnL in quote leg
+    df['upnl_quote'] = 0.0
+    df.loc[curr_long, 'upnl_quote'] = df['cum_amt'] * (df['px_bid_0_quote'] - df['px_quote'])
+    df.loc[curr_short, 'upnl_quote'] = df['cum_amt'] * (df['px_ask_0_quote'] - df['px_quote'])
+    df['upnl_quote'] = df['upnl_quote'].astype(float)
 
-    df['upnl_base'] = np.select(upnl_base_conditions, upnl_base_choices, default=0.0).astype(float)
-
-    # Unrealized PnL in quote leg
-    upnl_quote_conditions = [
-        df['cum_amt'] == 0,
-        df['cum_amt'] > 0,
-        df['cum_amt'] < 0
-    ]
-
-    upnl_quote_choices = [
-        0,
-        df['cum_amt'] * (df['px_bid_0_quote'] - df['px_quote']),
-        df['cum_amt'] * (df['px_ask_0_quote'] - df['px_quote'])
-    ]
-
-    df['upnl_quote'] = np.select(upnl_quote_conditions, upnl_quote_choices, default=0.0).astype(float)
-
-    # Total PnL in USD
+# Column TPNL_USD, TPNL_QUOTE - total PnL
     df['tpnl_usd'] = df['cum_rpnl_usd'] + df['upnl_usd']
-
-    # Total PnL in quote leg: realized (native) + unrealized in quote
-    df['tpnl_quote'] = df['rpnl'] + df['upnl_quote']
+    df['tpnl_quote'] = df['rpnl_intra'] + df['upnl_quote']
 
     return df
 
@@ -394,47 +367,53 @@ def _update(date_str: str):
 
     df_to_insert = df[key_cols].copy()
 
+    # Prepare data: fill NaNs and ensure correct types
+    symbol_cols = ['instrument', 'instrument_base', 'instrument_quote']
+    float_cols = ['amt_filled', 'px', 'px_quote', 'px_base', 'vol_usd',
+                  'cum_amt', 'cum_cost_usd', 'rpnl_usd_total', 'cum_rpnl_usd',
+                  'upnl_usd', 'upnl_base', 'upnl_quote', 'tpnl_usd', 'tpnl_quote']
+    int_cols = ['num_deals']
+
+    df_to_insert[float_cols] = df_to_insert[float_cols].fillna(0.0).astype(float)
+    df_to_insert[int_cols] = df_to_insert[int_cols].fillna(0).astype(int)
+    df_to_insert[symbol_cols] = df_to_insert[symbol_cols].astype(str)
+
     print(f"Inserting {len(df_to_insert)} rows to {MART_TABLE}")
 
     # Connect to QuestDB via ILP
     try:
-        # Format: tcp::addr=host:port
         conf = f'tcp::addr={QUESTDB_HOST}:9009;'
         with Sender.from_conf(conf) as sender:
             for _, row in df_to_insert.iterrows():
-                # Convert timestamp to nanoseconds
                 ts_nanos = TimestampNanos(int(pd.Timestamp(row['ts']).value))
-
-                # Build the row with symbols and numeric columns
 
                 sender.row(
                     MART_TABLE,
                     symbols={
-                        'instrument': str(row['instrument']),
-                        'instrument_base': str(row['instrument_base']) if pd.notna(row['instrument_base']) else None,
-                        'instrument_quote': str(row['instrument_quote']) if pd.notna(row['instrument_quote']) else None
+                        'instrument': row['instrument'],
+                        'instrument_base': row['instrument_base'] if row['instrument_base'] != 'nan' else None,
+                        'instrument_quote': row['instrument_quote'] if row['instrument_quote'] != 'nan' else None
                     },
                     columns={
-                        'amt_filled': float(row['amt_filled']) if pd.notna(row['amt_filled']) else 0.0,
-                        'px': float(row['px']) if pd.notna(row['px']) else 0.0,
-                        'px_quote': float(row['px_quote']) if pd.notna(row['px_quote']) else 0.0,
-                        'px_base': float(row['px_base']) if pd.notna(row['px_base']) else 0.0,
-                        'vol_usd': float(row['vol_usd']) if pd.notna(row['vol_usd']) else 0.0,
-                        'num_deals': int(row['num_deals']) if pd.notna(row['num_deals']) else 0,
-                        'cum_amt': float(row['cum_amt']) if pd.notna(row['cum_amt']) else 0.0,
-                        'cum_cost_usd': float(row['cum_cost_usd']) if pd.notna(row['cum_cost_usd']) else 0.0,
-                        'rpnl_usd_total': float(row['rpnl_usd_total']) if pd.notna(row['rpnl_usd_total']) else 0.0,
-                        'cum_rpnl_usd': float(row['cum_rpnl_usd']) if pd.notna(row['cum_rpnl_usd']) else 0.0,
-                        'upnl_usd': float(row['upnl_usd']) if pd.notna(row['upnl_usd']) else 0.0,
-                        'upnl_base': float(row['upnl_base']) if pd.notna(row['upnl_base']) else 0.0,
-                        'upnl_quote': float(row['upnl_quote']) if pd.notna(row['upnl_quote']) else 0.0,
-                        'tpnl_usd': float(row['tpnl_usd']) if pd.notna(row['tpnl_usd']) else 0.0,
-                        'tpnl_quote': float(row['tpnl_quote']) if pd.notna(row['tpnl_quote']) else 0.0
+                        'amt_filled': row['amt_filled'],
+                        'px': row['px'],
+                        'px_quote': row['px_quote'],
+                        'px_base': row['px_base'],
+                        'vol_usd': row['vol_usd'],
+                        'num_deals': row['num_deals'],
+                        'cum_amt': row['cum_amt'],
+                        'cum_cost_usd': row['cum_cost_usd'],
+                        'rpnl_usd_total': row['rpnl_usd_total'],
+                        'cum_rpnl_usd': row['cum_rpnl_usd'],
+                        'upnl_usd': row['upnl_usd'],
+                        'upnl_base': row['upnl_base'],
+                        'upnl_quote': row['upnl_quote'],
+                        'tpnl_usd': row['tpnl_usd'],
+                        'tpnl_quote': row['tpnl_quote']
                     },
                     at=ts_nanos
                 )
 
-            # Flush to ensure all data is sent
             sender.flush()
 
         print(f"Successfully inserted {len(df_to_insert)} rows for {date_str}")
@@ -444,18 +423,22 @@ def _update(date_str: str):
         raise
 
 if __name__ == "__main__":
-    for date_str in [
-        "2025-10-20", "2025-10-21", "2025-10-22",
-        "2025-10-23", "2025-10-24", "2025-10-25",
-        "2025-10-26", "2025-10-27", "2025-10-28",
-        "2025-10-29", "2025-10-30"
-    ]:
+    for date_str in ["2025-10-20"]:
+    # , "2025-10-21", "2025-10-22",
+    #     "2025-10-23", "2025-10-24", "2025-10-25",
+    #     "2025-10-26", "2025-10-27", "2025-10-28",
+    #     "2025-10-29", "2025-10-30"]:
         _update(date_str)
 
-    # df = _process("2025-10-26")
-    # print(df.columns)
-    # key_cols = ['ts', 'instrument', 'instrument_base', 'instrument_quote',
-    #             'amt_filled', 'px', 'px_quote', 'px_base', 'vol_usd', 'num_deals',
-    #             'cum_amt', 'cum_cost_usd', 'rpnl_usd_total', 'cum_rpnl_usd',
-    #             'upnl_usd', 'upnl_base', 'upnl_quote', 'tpnl_usd','tpnl_quote']
-    # print(df[df.px.notna()][key_cols].head(40))
+
+    df = _process("2025-10-20")
+    print(df.columns)
+    key_cols = ['ts', 'instrument', 'instrument_base', 'instrument_quote',
+                'amt_filled','px_bid_0', 'px_ask_0', 'px','px_base',  'px_quote',
+                'vol_usd', 'num_deals', 'cum_amt', 'cum_cost_usd', 'rpnl_usd_total', 'cum_rpnl_usd',
+                'upnl_usd', 'upnl_base', 'upnl_quote', 'tpnl_usd','tpnl_quote']
+
+    debug_cols = ['ts', 'instrument', 'amt_filled','px_bid_0',
+                    'px_bid_0_base', 'px_ask_0_base', 'px_bid_0_quote', 'px_ask_0_quote', 'px_bid_0_usd', 'px_ask_0_usd',\
+                    'px','px_base',  'px_quote',]
+    print(df[df.amt_filled != 0][key_cols].head(40))

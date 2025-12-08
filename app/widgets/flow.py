@@ -123,10 +123,10 @@ def _fetch_flow_metrics(start_datetime: str, end_datetime: str, instruments: Lis
         - ts: Timestamp (1-minute buckets)
         - instrument: Instrument name
         - upnl_usd: Unrealized PnL in USD
-        - rpnl_usd: Realized PnL in USD
+        - rpnl_usd_total: Realized PnL in USD (per bucket)
         - tpnl_usd: Total PnL in USD
         - vol_usd: Volume in USD per bucket
-        - cum_vol_usd: Cumulative volume in USD
+        - cum_cost_usd: Cumulative cost in USD
         - num_deals: Number of deals in bucket
     """
     # Parse datetime strings - support both date and datetime formats
@@ -168,10 +168,10 @@ def _fetch_flow_metrics(start_datetime: str, end_datetime: str, instruments: Lis
             ts,
             instrument,
             upnl_usd,
-            rpnl_usd,
+            rpnl_usd_total,
             tpnl_usd,
             vol_usd,
-            cum_vol_usd,
+            cum_cost_usd,
             num_deals
         FROM {FLOW_MART_TABLE}
         WHERE {where_clause}
@@ -208,7 +208,7 @@ def get_widget_layout(n_intervals):
     # Second subplot has secondary y-axis for num_deals
     fig = make_subplots(
         rows=2, cols=1,
-        subplot_titles=('PnL (USD) flow', 'Exposure (USD) flow'),
+        subplot_titles=('PnL (USD) flow', 'Exposure/Cost (USD) flow'),
         vertical_spacing=0.15,
         specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]]
     )
