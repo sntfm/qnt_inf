@@ -252,10 +252,60 @@ SELECT * FROM base;
     # Default zero where both buy and sell are zero
     df['cost_signed_usd'] = df['cost_signed_usd'].fillna(0.0).astype(float)
 
+# Column COST_SIGNED_BASE - track USD-equivalent value of base leg positions
+    # We need to track the USD cost of base currency flows AT THE TIME OF TRADE
+    base_bid = df['px_bid_0_base'].replace(0, np.nan)
+    base_ask = df['px_ask_0_base'].replace(0, np.nan)
+
+    # Forward-fill missing prices - these are used for ENTRY valuation
+    base_bid_filled = base_bid.groupby(df['instrument']).ffill()
+    base_ask_filled = base_ask.groupby(df['instrument']).ffill()
+
+    mask_buy = df['amt_buy'] > 0
+    mask_sell = df['amt_sell'] > 0
+
+    # When we BUY amt_buy units of ETH/EUR:
+    # - USD cost of this base AT ENTRY: amt_buy * base_bid_usd (at time of trade)
+    # Use the actual base_bid at time of trade (not forward-filled)
+    df['cost_signed_base'] = 0.0
+    df.loc[mask_buy, 'cost_signed_base'] = df.loc[mask_buy, 'amt_buy'] * base_bid_filled[mask_buy]
+    df.loc[mask_sell, 'cost_signed_base'] -= df.loc[mask_sell, 'amt_sell'] * base_ask_filled[mask_sell]
+
+    df['cost_signed_base'] = df['cost_signed_base'].fillna(0.0).astype(float)
+
+# Column COST_SIGNED_QUOTE - track USD-equivalent value of quote leg positions
+    # Quote leg: when we buy/sell the instrument, we spend/receive quote currency
+    # We need to track the USD cost of these quote currency flows AT THE TIME OF TRADE
+
+    quote_bid = df['px_bid_0_quote'].replace(0, np.nan)
+    quote_ask = df['px_ask_0_quote'].replace(0, np.nan)
+
+    # Forward-fill missing prices - these are used for ENTRY valuation
+    quote_bid_filled = quote_bid.groupby(df['instrument']).ffill()
+    quote_ask_filled = quote_ask.groupby(df['instrument']).ffill()
+
+    # When we BUY amt_buy units of ETH/EUR at px_buy EUR per ETH:
+    # - We spend (amt_buy * px_buy) EUR (quote currency)
+    # - USD cost of this quote AT ENTRY: (amt_buy * px_buy) * quote_bid_usd (at time of trade)
+    # - This is NEGATIVE because we're spending (reducing) our quote holdings
+    df['cost_signed_quote'] = 0.0
+    df.loc[mask_buy, 'cost_signed_quote'] = -(df.loc[mask_buy, 'amt_buy'] * df.loc[mask_buy, 'px_buy']) * quote_bid_filled[mask_buy]
+    df.loc[mask_sell, 'cost_signed_quote'] += (df.loc[mask_sell, 'amt_sell'] * df.loc[mask_sell, 'px_sell']) * quote_ask_filled[mask_sell]
+
+    df['cost_signed_quote'] = df['cost_signed_quote'].fillna(0.0).astype(float)
+
+#### Track cumulative quote amount in native currency
+    df['quote_amt_signed'] = 0.0
+    df.loc[mask_buy, 'quote_amt_signed'] = -(df['amt_buy'] * df['px_buy'])
+    df.loc[mask_sell, 'quote_amt_signed'] = (df['amt_sell'] * df['px_sell'])
+
 #### Cumulative calculations: running sums per instrument
     df = df.sort_values(['instrument', 'ts'])
     df['cum_amt'] = df.groupby('instrument')['amt_filled'].cumsum()
     df['cum_cost_usd'] = df.groupby('instrument')['cost_signed_usd'].cumsum()
+    df['cum_cost_base'] = df.groupby('instrument')['cost_signed_base'].cumsum()
+    df['cum_cost_quote'] = df.groupby('instrument')['cost_signed_quote'].cumsum()
+    df['cum_quote_amt'] = df.groupby('instrument')['quote_amt_signed'].cumsum()
 
     # Lagged values: previous cumulative snapshot
     df['prev_cum_amt'] = df.groupby('instrument')['cum_amt'].shift(1)
@@ -334,16 +384,46 @@ SELECT * FROM base;
     df.loc[curr_short, 'upnl_usd'] = df['cum_amt'] * (instrument_ask_usd - avg_cost_current)
     df['upnl_usd'] = df['upnl_usd'].astype(float)
 
-# Column UPNL_BASE - unrealized PnL in base leg
-    df['upnl_base'] = 0.0
-    df.loc[curr_long, 'upnl_base'] = df['cum_amt'] * (df['px_bid_0_base'] - df['px_base'])
-    df.loc[curr_short, 'upnl_base'] = df['cum_amt'] * (df['px_ask_0_base'] - df['px_base'])
+# Column UPNL_BASE - unrealized PnL in base leg (USD terms)
+    # Get CURRENT market prices for base (not entry prices)
+    base_bid_current = df['px_bid_0_base'].replace(0, np.nan).groupby(df['instrument']).ffill()
+    base_ask_current = df['px_ask_0_base'].replace(0, np.nan).groupby(df['instrument']).ffill()
+
+    # For long: value at bid (what we could sell for)
+    # For short: value at ask (what we'd need to buy to cover)
+    base_market_value_usd = np.where(
+        curr_long,
+        df['cum_amt'] * base_bid_current,
+        np.where(
+            curr_short,
+            df['cum_amt'] * base_ask_current,
+            0
+        )
+    )
+
+    df['upnl_base'] = base_market_value_usd - df['cum_cost_base']
     df['upnl_base'] = df['upnl_base'].astype(float)
 
-# Column UPNL_QUOTE - unrealized PnL in quote leg
-    df['upnl_quote'] = 0.0
-    df.loc[curr_long, 'upnl_quote'] = df['cum_amt'] * (df['px_bid_0_quote'] - df['px_quote'])
-    df.loc[curr_short, 'upnl_quote'] = df['cum_amt'] * (df['px_ask_0_quote'] - df['px_quote'])
+# Column UPNL_QUOTE - unrealized PnL in quote leg (USD terms)
+    # Get CURRENT market prices for quote (not entry prices)
+    quote_bid_current = df['px_bid_0_quote'].replace(0, np.nan).groupby(df['instrument']).ffill()
+    quote_ask_current = df['px_ask_0_quote'].replace(0, np.nan).groupby(df['instrument']).ffill()
+
+    # The quote amount is in cum_quote_amt (in native quote currency)
+    # Current value in USD depends on position direction:
+    # - If long instrument (short quote): use ask to value what we'd need to pay
+    # - If short instrument (long quote): use bid to value what we could sell for
+    quote_market_value_usd = np.where(
+        curr_long,
+        df['cum_quote_amt'] * quote_ask_current,  # negative amount * quote_ask
+        np.where(
+            curr_short,
+            df['cum_quote_amt'] * quote_bid_current,  # positive amount * quote_bid
+            0
+        )
+    )
+
+    df['upnl_quote'] = quote_market_value_usd - df['cum_cost_quote']
     df['upnl_quote'] = df['upnl_quote'].astype(float)
 
 # Column TPNL_USD, TPNL_QUOTE - total PnL
@@ -362,7 +442,8 @@ def _update(date_str: str):
     # Select only the columns we want to insert
     key_cols = ['ts', 'instrument', 'instrument_base', 'instrument_quote',
                 'amt_filled', 'px', 'px_quote', 'px_base', 'vol_usd', 'num_deals',
-                'cum_amt', 'cum_cost_usd', 'rpnl_usd_total', 'cum_rpnl_usd',
+                'cum_amt', 'cum_cost_usd', 'cum_cost_base', 'cum_cost_quote',
+                'rpnl_usd_total', 'cum_rpnl_usd',
                 'upnl_usd', 'upnl_base', 'upnl_quote', 'tpnl_usd', 'tpnl_quote']
 
     df_to_insert = df[key_cols].copy()
@@ -370,7 +451,8 @@ def _update(date_str: str):
     # Prepare data: fill NaNs and ensure correct types
     symbol_cols = ['instrument', 'instrument_base', 'instrument_quote']
     float_cols = ['amt_filled', 'px', 'px_quote', 'px_base', 'vol_usd',
-                  'cum_amt', 'cum_cost_usd', 'rpnl_usd_total', 'cum_rpnl_usd',
+                  'cum_amt', 'cum_cost_usd', 'cum_cost_base', 'cum_cost_quote',
+                  'rpnl_usd_total', 'cum_rpnl_usd',
                   'upnl_usd', 'upnl_base', 'upnl_quote', 'tpnl_usd', 'tpnl_quote']
     int_cols = ['num_deals']
 
@@ -403,6 +485,8 @@ def _update(date_str: str):
                         'num_deals': row['num_deals'],
                         'cum_amt': row['cum_amt'],
                         'cum_cost_usd': row['cum_cost_usd'],
+                        'cum_cost_base': row['cum_cost_base'],
+                        'cum_cost_quote': row['cum_cost_quote'],
                         'rpnl_usd_total': row['rpnl_usd_total'],
                         'cum_rpnl_usd': row['cum_rpnl_usd'],
                         'upnl_usd': row['upnl_usd'],
@@ -442,3 +526,9 @@ if __name__ == "__main__":
                     'px_bid_0_base', 'px_ask_0_base', 'px_bid_0_quote', 'px_ask_0_quote', 'px_bid_0_usd', 'px_ask_0_usd',\
                     'px','px_base',  'px_quote',]
     print(df[df.amt_filled != 0][key_cols].head(40))
+
+    # # Calculate difference to verify upnl_base + upnl_quote = upnl_usd
+    # df['upnl_diff'] = df['upnl_base'] + df['upnl_quote'] - df['upnl_usd']
+    # print("\nUPNL Decomposition Check (showing rows where amt_filled != 0):")
+    # check_cols = ['instrument', 'upnl_base', 'upnl_quote', 'upnl_usd', 'upnl_diff']
+    # print(df[df.amt_filled != 0][check_cols].head(30))
