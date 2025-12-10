@@ -208,7 +208,7 @@ def get_widget_layout(n_intervals):
     # Second subplot has secondary y-axis for num_deals
     fig = make_subplots(
         rows=2, cols=1,
-        subplot_titles=('PnL (USD) flow', 'Exposure/Cost (USD) flow'),
+        subplot_titles=('Mark to Market', 'Inventory'),
         vertical_spacing=0.15,
         specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]]
     )

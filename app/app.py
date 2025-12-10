@@ -256,7 +256,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
         # shared_xaxes='all' synchronizes zooming and panning while keeping separate tick labels
         fig = make_subplots(
             rows=2, cols=1,
-            subplot_titles=('PnL Curves (USD)', 'Exposure/Cost Curves (USD)'),
+            subplot_titles=('Mark to Market', 'Inventory'),
             vertical_spacing=0.15,
             specs=[[{"type": "xy"}], [{"type": "xy", "secondary_y": True}]],
             shared_xaxes='all'
@@ -295,9 +295,9 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
                 x=agg_df['ts'],
                 y=agg_df['tpnl_usd'],
                 mode='lines',
-                name='Total PnL',
+                name='TPNL',
                 line=dict(color='#2ecc71', width=2.5),
-                hovertemplate='<b>%{x}</b><br>Total PnL: $%{y:,.2f}<extra></extra>'
+                hovertemplate='<b>%{x}</b><br>TPNL: $%{y:,.2f}<extra></extra>'
             ),
             row=1, col=1
         )
@@ -309,7 +309,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
                 x=agg_df['ts'],
                 y=agg_df['vol_usd'],
                 mode='lines',
-                name='Volume',
+                name='Deal Volume',
                 line=dict(color='#9b59b6', width=2),
                 hovertemplate='<b>%{x}</b><br>Volume: $%{y:,.2f}<extra></extra>'
             ),
@@ -322,7 +322,7 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
                 x=agg_df['ts'],
                 y=agg_df['cum_cost_usd'],
                 mode='lines',
-                name='Cum. Cost',
+                name='Inventory Value',
                 line=dict(color='#f39c12', width=2),
                 hovertemplate='<b>%{x}</b><br>Cum. Cost: $%{y:,.2f}<extra></extra>'
             ),
@@ -379,6 +379,8 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
             row=1, col=1
         )
 
+        fig.update_yaxes(title_text="Instrument PnL, $", row=1, col=1, secondary_y=False)
+
         # X axis (pane 2)
         fig.update_xaxes(
             title_text="Time",
@@ -393,11 +395,11 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
         )
 
         # Y axis (pane 2)
-        fig.update_yaxes(title_text="Volume/Cost ($)", row=2, col=1, secondary_y=False)
+        fig.update_yaxes(title_text="Inventory Value/Deal Volume, $", row=2, col=1, secondary_y=False)
 
         # Y axis secondary (pane 2)
         fig.update_yaxes(
-            title_text="# Deals",
+            title_text="Deals, #",
             showspikes=False,
             spikemode='across',
             spikesnap='cursor',
@@ -418,7 +420,21 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
         total_deals = int(agg_df['num_deals'].sum())
 
         instruments_str = f"{len(selected_instruments)} instruments" if selected_instruments else "All instruments"
-        status = f"{instruments_str} | Total PnL: ${total_pnl:,.2f} (UPNL: ${total_upnl:,.2f}, RPNL: ${total_rpnl:,.2f}) | Volume: ${total_volume:,.2f} | Deals: {total_deals:,}"
+        status = html.Div([
+            instruments_str,
+            html.Br(),
+            f"PnL:",
+            html.Br(),
+            f"\u00A0\u00A0\u00A0\u00A0Total: ${total_pnl:,.2f}",
+            html.Br(),
+            f"\u00A0\u00A0\u00A0\u00A0Unrealized: ${total_upnl:,.2f}",
+            html.Br(),
+            f"\u00A0\u00A0\u00A0\u00A0Realized: ${total_rpnl:,.2f}",
+            html.Br(),
+            f"Deal Volume: ${total_volume:,.2f}",
+            html.Br(),
+            f"Deals: {total_deals:,}"
+        ], style={'textAlign': 'left'})
 
         return fig, status, instrument_options
 
