@@ -32,6 +32,57 @@ def _connect():
     return create_engine(connection_string, connect_args={"connect_timeout": 30})
 
 
+def _get_previous_day_cumsum(engine, date_str: str):
+    """Fetch the last cumulative values from the previous day for each instrument."""
+    from datetime import datetime, timedelta
+
+    current_date = datetime.strptime(date_str, "%Y-%m-%d")
+    prev_date = current_date - timedelta(days=1)
+    prev_date_start = f"{prev_date.strftime('%Y-%m-%d')}T00:00:00.000000Z"
+    prev_date_end = f"{prev_date.strftime('%Y-%m-%d')}T23:59:59.999999Z"
+
+    query = f"""
+    WITH ranked AS (
+        SELECT
+            instrument,
+            cum_amt,
+            cum_cost_usd,
+            cum_cost_base,
+            cum_cost_quote,
+            cum_quote_amt,
+            cum_vol_usd,
+            cum_rpnl_usd,
+            ROW_NUMBER() OVER (PARTITION BY instrument ORDER BY ts DESC) as rn
+        FROM {MART_TABLE}
+        WHERE ts >= '{prev_date_start}'
+          AND ts <= '{prev_date_end}'
+    )
+    SELECT
+        instrument,
+        cum_amt,
+        cum_cost_usd,
+        cum_cost_base,
+        cum_cost_quote,
+        cum_quote_amt,
+        cum_vol_usd,
+        cum_rpnl_usd
+    FROM ranked
+    WHERE rn = 1
+    """
+
+    try:
+        prev_df = pd.read_sql(query, engine)
+        if len(prev_df) > 0:
+            print(f"Loaded previous day cumsum values for {len(prev_df)} instruments")
+            return prev_df.set_index('instrument')
+        else:
+            print("No previous day data found, starting from zero")
+            return pd.DataFrame()
+    except Exception as e:
+        print(f"Could not fetch previous day data: {e}. Starting from zero.")
+        return pd.DataFrame()
+
+
 def _process(date_str: str):
     print(f"Processing PnL flow data for {date_str}")
 
@@ -162,6 +213,10 @@ SELECT * FROM base;
 
 
     engine = _connect()
+
+    # Fetch previous day's cumulative values
+    prev_cumsum = _get_previous_day_cumsum(engine, date_str)
+
     df = pd.read_sql(insert_sql, engine)
     engine.dispose()
 
@@ -301,11 +356,31 @@ SELECT * FROM base;
 
 #### Cumulative calculations: running sums per instrument
     df = df.sort_values(['instrument', 'ts'])
-    df['cum_amt'] = df.groupby('instrument')['amt_filled'].cumsum()
-    df['cum_cost_usd'] = df.groupby('instrument')['cost_signed_usd'].cumsum()
-    df['cum_cost_base'] = df.groupby('instrument')['cost_signed_base'].cumsum()
-    df['cum_cost_quote'] = df.groupby('instrument')['cost_signed_quote'].cumsum()
-    df['cum_quote_amt'] = df.groupby('instrument')['quote_amt_signed'].cumsum()
+
+    # Initialize cumulative columns with previous day's final values
+    if not prev_cumsum.empty:
+        df['prev_day_cum_amt'] = df['instrument'].map(prev_cumsum['cum_amt']).fillna(0)
+        df['prev_day_cum_cost_usd'] = df['instrument'].map(prev_cumsum['cum_cost_usd']).fillna(0)
+        df['prev_day_cum_cost_base'] = df['instrument'].map(prev_cumsum['cum_cost_base']).fillna(0)
+        df['prev_day_cum_cost_quote'] = df['instrument'].map(prev_cumsum['cum_cost_quote']).fillna(0)
+        df['prev_day_cum_quote_amt'] = df['instrument'].map(prev_cumsum['cum_quote_amt']).fillna(0)
+    else:
+        df['prev_day_cum_amt'] = 0
+        df['prev_day_cum_cost_usd'] = 0
+        df['prev_day_cum_cost_base'] = 0
+        df['prev_day_cum_cost_quote'] = 0
+        df['prev_day_cum_quote_amt'] = 0
+
+    # Compute cumulative sums starting from previous day's values
+    df['cum_amt'] = df['prev_day_cum_amt'] + df.groupby('instrument')['amt_filled'].cumsum()
+    df['cum_cost_usd'] = df['prev_day_cum_cost_usd'] + df.groupby('instrument')['cost_signed_usd'].cumsum()
+    df['cum_cost_base'] = df['prev_day_cum_cost_base'] + df.groupby('instrument')['cost_signed_base'].cumsum()
+    df['cum_cost_quote'] = df['prev_day_cum_cost_quote'] + df.groupby('instrument')['cost_signed_quote'].cumsum()
+    df['cum_quote_amt'] = df['prev_day_cum_quote_amt'] + df.groupby('instrument')['quote_amt_signed'].cumsum()
+
+    # Drop temporary columns
+    df = df.drop(columns=['prev_day_cum_amt', 'prev_day_cum_cost_usd', 'prev_day_cum_cost_base',
+                          'prev_day_cum_cost_quote', 'prev_day_cum_quote_amt'])
 
     # Lagged values: previous cumulative snapshot
     df['prev_cum_amt'] = df.groupby('instrument')['cum_amt'].shift(1)
@@ -368,8 +443,19 @@ SELECT * FROM base;
     df['rpnl_usd_total'] = df['rpnl_usd_total'].astype(float)
 
 # Column CUM_VOL_USD, CUM_RPNL_USD
-    df['cum_vol_usd'] = df.groupby('instrument')['vol_usd'].cumsum()
-    df['cum_rpnl_usd'] = df.groupby('instrument')['rpnl_usd_total'].cumsum()
+    # Add previous day's cumulative values
+    if not prev_cumsum.empty:
+        df['prev_day_cum_vol_usd'] = df['instrument'].map(prev_cumsum['cum_vol_usd']).fillna(0)
+        df['prev_day_cum_rpnl_usd'] = df['instrument'].map(prev_cumsum['cum_rpnl_usd']).fillna(0)
+    else:
+        df['prev_day_cum_vol_usd'] = 0
+        df['prev_day_cum_rpnl_usd'] = 0
+
+    df['cum_vol_usd'] = df['prev_day_cum_vol_usd'] + df.groupby('instrument')['vol_usd'].cumsum()
+    df['cum_rpnl_usd'] = df['prev_day_cum_rpnl_usd'] + df.groupby('instrument')['rpnl_usd_total'].cumsum()
+
+    # Drop temporary columns
+    df = df.drop(columns=['prev_day_cum_vol_usd', 'prev_day_cum_rpnl_usd'])
 
 # Column UPNL_USD - unrealized PnL in USD
     # Average cost of current position (handle division by zero)
@@ -442,7 +528,7 @@ def _update(date_str: str):
     # Select only the columns we want to insert
     key_cols = ['ts', 'instrument', 'instrument_base', 'instrument_quote',
                 'amt_filled', 'px', 'px_quote', 'px_base', 'vol_usd', 'num_deals',
-                'cum_amt', 'cum_cost_usd', 'cum_cost_base', 'cum_cost_quote',
+                'cum_amt', 'cum_cost_usd', 'cum_cost_base', 'cum_cost_quote', 'cum_quote_amt', 'cum_vol_usd',
                 'rpnl_usd_total', 'cum_rpnl_usd',
                 'upnl_usd', 'upnl_base', 'upnl_quote', 'tpnl_usd', 'tpnl_quote']
 
@@ -451,7 +537,7 @@ def _update(date_str: str):
     # Prepare data: fill NaNs and ensure correct types
     symbol_cols = ['instrument', 'instrument_base', 'instrument_quote']
     float_cols = ['amt_filled', 'px', 'px_quote', 'px_base', 'vol_usd',
-                  'cum_amt', 'cum_cost_usd', 'cum_cost_base', 'cum_cost_quote',
+                  'cum_amt', 'cum_cost_usd', 'cum_cost_base', 'cum_cost_quote', 'cum_quote_amt', 'cum_vol_usd',
                   'rpnl_usd_total', 'cum_rpnl_usd',
                   'upnl_usd', 'upnl_base', 'upnl_quote', 'tpnl_usd', 'tpnl_quote']
     int_cols = ['num_deals']
@@ -487,6 +573,8 @@ def _update(date_str: str):
                         'cum_cost_usd': row['cum_cost_usd'],
                         'cum_cost_base': row['cum_cost_base'],
                         'cum_cost_quote': row['cum_cost_quote'],
+                        'cum_quote_amt': row['cum_quote_amt'],
+                        'cum_vol_usd': row['cum_vol_usd'],
                         'rpnl_usd_total': row['rpnl_usd_total'],
                         'cum_rpnl_usd': row['cum_rpnl_usd'],
                         'upnl_usd': row['upnl_usd'],
@@ -507,28 +595,50 @@ def _update(date_str: str):
         raise
 
 if __name__ == "__main__":
-    for date_str in ["2025-10-20"]:
-    # , "2025-10-21", "2025-10-22",
-    #     "2025-10-23", "2025-10-24", "2025-10-25",
-    #     "2025-10-26", "2025-10-27", "2025-10-28",
-    #     "2025-10-29", "2025-10-30"]:
+    def test_carryover():
+        # Test cumsum carryover across days
+        print("\n" + "="*80)
+        print("TESTING CUMSUM CARRYOVER ACROSS DAYS")
+        print("="*80)
+
+        # Process two consecutive days
+        df_day1 = _process("2025-10-20")
+        df_day2 = _process("2025-10-21")
+
+        print("\n--- Day 1 (2025-10-20) Final Cumsum Values ---")
+        cumsum_cols = ['instrument', 'cum_amt', 'cum_cost_usd', 'cum_vol_usd', 'cum_rpnl_usd']
+        day1_final = df_day1[df_day1.amt_filled != 0].groupby('instrument')[cumsum_cols].last()
+        print(day1_final.head(10))
+
+        print("\n--- Day 2 (2025-10-21) Initial Cumsum Values (first trade per instrument) ---")
+        day2_initial = df_day2[df_day2.amt_filled != 0].groupby('instrument')[cumsum_cols].first()
+        print(day2_initial.head(10))
+
+        print("\n--- Verification: Day 2 Initial should continue from Day 1 Final ---")
+        # The first cumsum value of day2 should be: day1_final + day2_first_trade_delta
+        # To verify properly, we need to check if initial values loaded correctly
+        # Let's check a specific instrument
+        test_instruments = day1_final.head(3).index.tolist()
+        for inst in test_instruments:
+            if inst in day1_final.index and inst in day2_initial.index:
+                day1_final_amt = day1_final.loc[inst, 'cum_amt']
+                day2_initial_amt = day2_initial.loc[inst, 'cum_amt']
+                print(f"\n{inst}:")
+                print(f"  Day 1 final cum_amt: {day1_final_amt:.6f}")
+                print(f"  Day 2 first trade cum_amt: {day2_initial_amt:.6f}")
+                print(f"  Carryover working!" if day2_initial_amt > day1_final_amt or abs(day2_initial_amt - day1_final_amt) < 1e-6 else "  ✗ ERROR: Reset detected!")
+
+        print("\n" + "="*80)
+        print("Running normal update process...")
+        print("="*80 + "\n")
+
+
+    for date_str in [
+    "2025-10-20", 
+    "2025-10-21", "2025-10-22", "2025-10-23", 
+    "2025-10-24", "2025-10-25", "2025-10-26", 
+    "2025-10-27", "2025-10-28", "2025-10-29", 
+    "2025-10-30"]:
         _update(date_str)
 
-
-    df = _process("2025-10-20")
-    print(df.columns)
-    key_cols = ['ts', 'instrument', 'instrument_base', 'instrument_quote',
-                'amt_filled','px_bid_0', 'px_ask_0', 'px','px_base',  'px_quote',
-                'vol_usd', 'num_deals', 'cum_amt', 'cum_cost_usd', 'rpnl_usd_total', 'cum_rpnl_usd',
-                'upnl_usd', 'upnl_base', 'upnl_quote', 'tpnl_usd','tpnl_quote']
-
-    debug_cols = ['ts', 'instrument', 'amt_filled','px_bid_0',
-                    'px_bid_0_base', 'px_ask_0_base', 'px_bid_0_quote', 'px_ask_0_quote', 'px_bid_0_usd', 'px_ask_0_usd',\
-                    'px','px_base',  'px_quote',]
-    print(df[df.amt_filled != 0][key_cols].head(40))
-
-    # # Calculate difference to verify upnl_base + upnl_quote = upnl_usd
-    # df['upnl_diff'] = df['upnl_base'] + df['upnl_quote'] - df['upnl_usd']
-    # print("\nUPNL Decomposition Check (showing rows where amt_filled != 0):")
-    # check_cols = ['instrument', 'upnl_base', 'upnl_quote', 'upnl_usd', 'upnl_diff']
-    # print(df[df.amt_filled != 0][check_cols].head(30))
+    # test_carryover()
