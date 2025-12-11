@@ -167,7 +167,11 @@ def _fetch_flow_metrics(start_datetime: str, end_datetime: str, instruments: Lis
         SELECT
             ts,
             instrument,
+            instrument_base,
+            instrument_quote,
             upnl_usd,
+            upnl_base,
+            upnl_quote,
             rpnl_usd_total,
             tpnl_usd,
             vol_usd,

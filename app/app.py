@@ -253,6 +253,8 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments,
             'num_deals': 'sum'
         }).reset_index()
 
+        print(f"[DEBUG] Aggregated metrics_df columns: {metrics_df.columns.tolist()}")
+
         # Create figure with 2 subplots (panes)
         # Second subplot has secondary y-axis for num_deals
         # shared_xaxes='all' synchronizes zooming and panning while keeping separate tick labels
@@ -310,6 +312,40 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments,
             ),
             row=1, col=1
         )
+
+        # Add UPNL breakdown by instrument_quote (one line per distinct instrument_quote)
+        if 'instrument_quote' in metrics_df.columns and 'upnl_quote' in metrics_df.columns:
+            # Filter out None and NaN values from instrument_quote before grouping
+            quote_df = metrics_df[metrics_df['instrument_quote'].notna() & (metrics_df['instrument_quote'] != '') & (metrics_df['instrument_quote'] != 'None')]
+
+            if not quote_df.empty:
+                # Group by ts and instrument_quote, summing upnl_quote for each
+                quote_grouped = quote_df.groupby(['ts', 'instrument_quote']).agg({
+                    'upnl_quote': 'sum'
+                }).reset_index()
+
+                # Get unique instrument_quote values (already filtered, but double-check)
+                unique_quote_instruments = sorted([x for x in quote_grouped['instrument_quote'].unique() if x and str(x) not in ['nan', 'None', '']])
+
+                # Create color palette for quote instruments
+                import plotly.express as px
+                quote_colors = px.colors.qualitative.Set2
+
+                for idx, quote_inst in enumerate(unique_quote_instruments):
+                    quote_data = quote_grouped[quote_grouped['instrument_quote'] == quote_inst]
+
+                    fig.add_trace(
+                        go.Scatter(
+                            x=quote_data['ts'],
+                            y=quote_data['upnl_quote'],
+                            mode='lines',
+                            name=f'UPNL {quote_inst}',
+                            line=dict(color=quote_colors[idx % len(quote_colors)], width=1.5, dash='dot'),
+                            hovertemplate=f'<b>%{{x}}</b><br>{quote_inst} UPNL: $%{{y:,.2f}}<extra></extra>',
+                            visible=True if legend_state.get(f'UPNL {quote_inst}', True) else 'legendonly'
+                        ),
+                        row=1, col=1
+                    )
 
         # === Pane 2: Volume curves ===
         # Add Volume trace
