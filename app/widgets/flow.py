@@ -358,6 +358,9 @@ def get_widget_layout(n_intervals):
 
     # Main layout
     return html.Div([
+        # Store component to persist legend visibility state
+        dcc.Store(id='flow-legend-state', data={}),
+
         html.Div([
             # Left side - Graph
             html.Div(

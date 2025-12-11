@@ -1,6 +1,7 @@
 import dash
 from dash import dcc, html, callback_context
 from dash.dependencies import Input, Output, State
+from dash.exceptions import PreventUpdate
 import plotly.graph_objs as go
 from flask import redirect
 from datetime import datetime
@@ -191,10 +192,11 @@ def initialize_flow_widget(pathname):
     Input('flow-load-button', 'n_clicks'),
     [State('flow-start-datetime', 'value'),
      State('flow-end-datetime', 'value'),
-     State('flow-instrument-filter', 'value')],
+     State('flow-instrument-filter', 'value'),
+     State('flow-legend-state', 'data')],
     prevent_initial_call=True
 )
-def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments):
+def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments, legend_state):
     """Fetch flow metrics and plot them with two panes: PnL curves and Volume curves."""
     from plotly.subplots import make_subplots
 
@@ -262,6 +264,10 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
             shared_xaxes='all'
         )
 
+        # Initialize legend_state if None
+        if legend_state is None:
+            legend_state = {}
+
         # === Pane 1: PnL curves ===
         # Add UPNL trace
         fig.add_trace(
@@ -271,7 +277,8 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
                 mode='lines',
                 name='UPNL',
                 line=dict(color='#3498db', width=2),
-                hovertemplate='<b>%{x}</b><br>UPNL: $%{y:,.2f}<extra></extra>'
+                hovertemplate='<b>%{x}</b><br>UPNL: $%{y:,.2f}<extra></extra>',
+                visible=True if legend_state.get('UPNL', True) else 'legendonly'
             ),
             row=1, col=1
         )
@@ -284,7 +291,8 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
                 mode='lines',
                 name='RPNL',
                 line=dict(color='#e74c3c', width=2),
-                hovertemplate='<b>%{x}</b><br>RPNL: $%{y:,.2f}<extra></extra>'
+                hovertemplate='<b>%{x}</b><br>RPNL: $%{y:,.2f}<extra></extra>',
+                visible=True if legend_state.get('RPNL', True) else 'legendonly'
             ),
             row=1, col=1
         )
@@ -297,7 +305,8 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
                 mode='lines',
                 name='TPNL',
                 line=dict(color='#2ecc71', width=2.5),
-                hovertemplate='<b>%{x}</b><br>TPNL: $%{y:,.2f}<extra></extra>'
+                hovertemplate='<b>%{x}</b><br>TPNL: $%{y:,.2f}<extra></extra>',
+                visible=True if legend_state.get('TPNL', True) else 'legendonly'
             ),
             row=1, col=1
         )
@@ -311,7 +320,8 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
                 mode='lines',
                 name='Deal Volume',
                 line=dict(color='#9b59b6', width=2),
-                hovertemplate='<b>%{x}</b><br>Volume: $%{y:,.2f}<extra></extra>'
+                hovertemplate='<b>%{x}</b><br>Volume: $%{y:,.2f}<extra></extra>',
+                visible=True if legend_state.get('Deal Volume', True) else 'legendonly'
             ),
             row=2, col=1
         )
@@ -324,7 +334,8 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
                 mode='lines',
                 name='Inventory Value',
                 line=dict(color='#f39c12', width=2),
-                hovertemplate='<b>%{x}</b><br>Cum. Cost: $%{y:,.2f}<extra></extra>'
+                hovertemplate='<b>%{x}</b><br>Cum. Cost: $%{y:,.2f}<extra></extra>',
+                visible=True if legend_state.get('Inventory Value', True) else 'legendonly'
             ),
             row=2, col=1,
             secondary_y=False
@@ -338,7 +349,8 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
                 mode='lines',
                 name='# Deals',
                 line=dict(color='#95a5a6', width=1.5, dash='dot'),
-                hovertemplate='<b>%{x}</b><br># Deals: %{y}<extra></extra>'
+                hovertemplate='<b>%{x}</b><br># Deals: %{y}<extra></extra>',
+                visible=True if legend_state.get('# Deals', True) else 'legendonly'
             ),
             row=2, col=1,
             secondary_y=True
@@ -467,6 +479,51 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments)
             ],
         )
         return fig, f"Error: {str(e)}", []
+
+# Flow widget callback - Persist legend state
+@app.callback(
+    Output('flow-legend-state', 'data'),
+    Input('flow-graph', 'restyleData'),
+    State('flow-legend-state', 'data'),
+    prevent_initial_call=True
+)
+def update_legend_state(restyle_data, current_state):
+    """Capture legend clicks and persist the visibility state."""
+    if restyle_data is None:
+        raise PreventUpdate
+
+    # Initialize state if None
+    if current_state is None:
+        current_state = {}
+
+    # restyle_data format: [{'visible': [True/False/'legendonly']}, [trace_index]]
+    # or [{'visible': True/False/'legendonly'}, [trace_index1, trace_index2, ...]]
+    try:
+        updates = restyle_data[0]
+        trace_indices = restyle_data[1] if len(restyle_data) > 1 else []
+
+        # Map trace indices to trace names
+        trace_names = ['UPNL', 'RPNL', 'TPNL', 'Deal Volume', 'Inventory Value', '# Deals']
+
+        if 'visible' in updates:
+            visible_value = updates['visible']
+
+            # Handle both single value and list of values
+            if isinstance(visible_value, list):
+                for idx, trace_idx in enumerate(trace_indices):
+                    if trace_idx < len(trace_names):
+                        # Convert 'legendonly' to False, True stays True
+                        current_state[trace_names[trace_idx]] = visible_value[idx] is True
+            else:
+                for trace_idx in trace_indices:
+                    if trace_idx < len(trace_names):
+                        # Convert 'legendonly' to False, True stays True
+                        current_state[trace_names[trace_idx]] = visible_value is True
+
+        return current_state
+    except Exception as e:
+        print(f"[DEBUG] Error updating legend state: {e}")
+        raise PreventUpdate
 
 @app.callback(
     Output('decay-widget-container', 'children'),
