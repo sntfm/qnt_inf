@@ -149,7 +149,7 @@ def write_to_questdb(decomposition_dict):
             # For major pairs, base and quote are NULL
             # For decomposed pairs, extract the base and quote instruments
             if is_major:
-                instrument_base = None
+                instrument_base = instrument
                 instrument_quote = None
                 instrument_usd = None
                 inst_usd_is_inverted = False

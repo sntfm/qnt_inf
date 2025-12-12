@@ -347,6 +347,40 @@ def load_flow_data(n_clicks, start_datetime, end_datetime, selected_instruments,
                         row=1, col=1
                     )
 
+        # Add UPNL breakdown by instrument_base (one line per distinct instrument_base)
+        if 'instrument_base' in metrics_df.columns and 'upnl_base' in metrics_df.columns:
+            # Filter out None and NaN values from instrument_base before grouping
+            base_df = metrics_df[metrics_df['instrument_base'].notna() & (metrics_df['instrument_base'] != '') & (metrics_df['instrument_base'] != 'None')]
+
+            if not base_df.empty:
+                # Group by ts and instrument_base, summing upnl_base for each
+                base_grouped = base_df.groupby(['ts', 'instrument_base']).agg({
+                    'upnl_base': 'sum'
+                }).reset_index()
+
+                # Get unique instrument_base values (already filtered, but double-check)
+                unique_base_instruments = sorted([x for x in base_grouped['instrument_base'].unique() if x and str(x) not in ['nan', 'None', '']])
+
+                # Create color palette for base instruments
+                import plotly.express as px
+                base_colors = px.colors.qualitative.Set3
+
+                for idx, base_inst in enumerate(unique_base_instruments):
+                    base_data = base_grouped[base_grouped['instrument_base'] == base_inst]
+
+                    fig.add_trace(
+                        go.Scatter(
+                            x=base_data['ts'],
+                            y=base_data['upnl_base'],
+                            mode='lines',
+                            name=f'UPNL {base_inst}',
+                            line=dict(color=base_colors[idx % len(base_colors)], width=1.5, dash='dash'),
+                            hovertemplate=f'<b>%{{x}}</b><br>{base_inst} UPNL: $%{{y:,.2f}}<extra></extra>',
+                            visible=True if legend_state.get(f'UPNL {base_inst}', True) else 'legendonly'
+                        ),
+                        row=1, col=1
+                    )
+
         # === Pane 2: Volume curves ===
         # Add Volume trace
         fig.add_trace(

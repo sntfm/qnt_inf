@@ -5,11 +5,11 @@ from sqlalchemy import create_engine
 from questdb.ingress import Sender, IngressError, TimestampNanos
 
 # Configure pandas display options
-pd.set_option('display.max_columns', None)  # Show all columns
-pd.set_option('display.width', None)  # Auto-detect width
-pd.set_option('display.max_colwidth', None)  # No truncation of column values
-pd.set_option('display.expand_frame_repr', False)  # Prevent wrapping
-pd.set_option('display.max_rows', 100)  # Increase if needed
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', None)
+pd.set_option('display.max_colwidth', None)
+pd.set_option('display.expand_frame_repr', False)
+pd.set_option('display.max_rows', 100)
 
 # ---------------------------------------------------------------------------
 # QuestDB connection settings
@@ -32,14 +32,9 @@ def _connect():
     return create_engine(connection_string, connect_args={"connect_timeout": 30})
 
 
-def _get_previous_day_cumsum(engine, date_str: str):
-    """Fetch the last cumulative values from the previous day for each instrument."""
-    from datetime import datetime, timedelta
-
-    current_date = datetime.strptime(date_str, "%Y-%m-%d")
-    prev_date = current_date - timedelta(days=1)
-    prev_date_start = f"{prev_date.strftime('%Y-%m-%d')}T00:00:00.000000Z"
-    prev_date_end = f"{prev_date.strftime('%Y-%m-%d')}T23:59:59.999999Z"
+def _get_prev_cumsum(engine, date_str: str):
+    """Fetch the last cumulative values before the target date for each instrument."""
+    date_start = f"{date_str}T00:00:00.000000Z"
 
     query = f"""
     WITH ranked AS (
@@ -49,13 +44,13 @@ def _get_previous_day_cumsum(engine, date_str: str):
             cum_cost_usd,
             cum_cost_base,
             cum_cost_quote,
+            cum_cost_native,
             cum_quote_amt,
             cum_vol_usd,
             cum_rpnl_usd,
             ROW_NUMBER() OVER (PARTITION BY instrument ORDER BY ts DESC) as rn
         FROM {MART_TABLE}
-        WHERE ts >= '{prev_date_start}'
-          AND ts <= '{prev_date_end}'
+        WHERE ts < '{date_start}'
     )
     SELECT
         instrument,
@@ -63,6 +58,7 @@ def _get_previous_day_cumsum(engine, date_str: str):
         cum_cost_usd,
         cum_cost_base,
         cum_cost_quote,
+        cum_cost_native,
         cum_quote_amt,
         cum_vol_usd,
         cum_rpnl_usd
@@ -73,15 +69,128 @@ def _get_previous_day_cumsum(engine, date_str: str):
     try:
         prev_df = pd.read_sql(query, engine)
         if len(prev_df) > 0:
-            print(f"Loaded previous day cumsum values for {len(prev_df)} instruments")
+            print(f"Loaded previous cumsum values for {len(prev_df)} instruments")
             return prev_df.set_index('instrument')
         else:
-            print("No previous day data found, starting from zero")
+            print("No previous data found, starting from zero")
             return pd.DataFrame()
     except Exception as e:
-        print(f"Could not fetch previous day data: {e}. Starting from zero.")
+        print(f"Could not fetch previous data: {e}. Starting from zero.")
         return pd.DataFrame()
 
+
+# ---------------------------------------------------------------------------
+# Helper functions for price conversions
+# ---------------------------------------------------------------------------
+
+def _forward_fill_by_instrument(df, series):
+    """Forward fill a series grouping by instrument."""
+    return series.groupby(df['instrument']).ffill()
+
+
+def _convert_to_usd(df, native_values, usd_bid, usd_ask, inv_flag, value_type='positive'):
+    """
+    Convert native currency values to USD.
+
+    value_type: 'positive' uses bid for positive values and ask for negative
+                'mid' uses mid price
+    """
+    has_usd = df['instrument_usd'].notna()
+    result = native_values.copy()
+
+    if value_type == 'mid':
+        usd_mid = (usd_bid + usd_ask) / 2
+        result[has_usd & ~inv_flag] = native_values * usd_mid
+        result[has_usd & inv_flag] = native_values / usd_mid
+    else:
+        positive = native_values > 0
+        negative = native_values < 0
+        result[has_usd & ~inv_flag & positive] = native_values * usd_bid
+        result[has_usd & ~inv_flag & negative] = native_values * usd_ask
+        result[has_usd & inv_flag & positive] = native_values / usd_bid
+        result[has_usd & inv_flag & negative] = native_values / usd_ask
+
+    return result.astype(float)
+
+
+def _get_position_conditions(amounts):
+    """Get boolean masks for position states (long/short/flat)."""
+    return {
+        'long': amounts > 0,
+        'short': amounts < 0,
+        'flat': amounts.isna() | (np.abs(amounts) < 1e-10)
+    }
+
+
+def _calculate_realized_pnl(df, amt_col, cost_col, market_px_usd, rpnl_base):
+    """
+    Calculate realized PnL from position changes (reductions/flips).
+    Reusable for both instrument and quote legs.
+    """
+    prev_amt = df.groupby('instrument')[amt_col].shift(1)
+    prev_cost = df.groupby('instrument')[cost_col].shift(1)
+
+    avg_cost = prev_cost / prev_amt
+
+    prev = _get_position_conditions(prev_amt)
+    curr = _get_position_conditions(df[amt_col])
+
+    # Position closed or flipped
+    closed_or_flipped = curr['flat'] | ((prev['long'] & curr['short']) | (prev['short'] & curr['long']))
+
+    # Position reduced (same sign, smaller absolute value)
+    reduced = ((prev['long'] & curr['long']) | (prev['short'] & curr['short'])) & \
+              (np.abs(df[amt_col]) < np.abs(prev_amt))
+
+    # Compute realized PnL
+    rpnl_total = rpnl_base.copy()
+
+    # Closed/flipped: realize entire previous position
+    rpnl_total[closed_or_flipped & ~prev['flat']] = (
+        rpnl_base + prev_amt * (market_px_usd - avg_cost)
+    )[closed_or_flipped & ~prev['flat']]
+
+    # Reduced: realize the reduction
+    rpnl_total[reduced] = (
+        rpnl_base + (prev_amt - df[amt_col]) * (market_px_usd - avg_cost)
+    )[reduced]
+
+    return rpnl_total.astype(float)
+
+
+def _initialize_cumulative_columns(df, prev_cumsum, columns):
+    """Initialize cumulative columns with previous day's values."""
+    for col in columns:
+        prev_col = f'prev_day_{col}'
+        if not prev_cumsum.empty and col in prev_cumsum.columns:
+            df[prev_col] = df['instrument'].map(prev_cumsum[col]).fillna(0)
+        else:
+            df[prev_col] = 0
+    return df
+
+
+def _compute_cumsum_with_carryover(df, prev_cumsum, flow_columns):
+    """
+    Compute cumulative sums starting from previous day's values.
+
+    flow_columns: dict mapping cumulative column name to flow column name
+                  e.g., {'cum_amt': 'amt_base', 'cum_cost_usd': 'cost_signed_usd'}
+    """
+    cum_cols = list(flow_columns.keys())
+    df = _initialize_cumulative_columns(df, prev_cumsum, cum_cols)
+
+    for cum_col, flow_col in flow_columns.items():
+        prev_col = f'prev_day_{cum_col}'
+        df[cum_col] = df[prev_col] + df.groupby('instrument')[flow_col].cumsum()
+
+    # Drop temporary columns
+    df = df.drop(columns=[f'prev_day_{col}' for col in cum_cols])
+    return df
+
+
+# ---------------------------------------------------------------------------
+# Main processing function
+# ---------------------------------------------------------------------------
 
 def _process(date_str: str):
     print(f"Processing PnL flow data for {date_str}")
@@ -141,8 +250,8 @@ rd AS (
         s.px_sell,
         COALESCE(b.amt_buy, 0) AS amt_buy,
         COALESCE(s.amt_sell, 0) AS amt_sell,
-        COALESCE(b.amt_buy, 0) - COALESCE(s.amt_sell, 0) AS amt_filled,
-        LEAST(COALESCE(b.amt_buy, 0), COALESCE(s.amt_sell, 0)) AS amt_matched,
+        COALESCE(b.amt_buy, 0) - COALESCE(s.amt_sell, 0) AS amt_base,
+        LEAST(COALESCE(b.amt_buy, 0), COALESCE(s.amt_sell, 0)) AS amt_base_matched,
         COALESCE(b.cnt_buy, 0) + COALESCE(s.cnt_sell, 0) AS num_deals
     FROM deals_buy b
     FULL OUTER JOIN deals_sell s
@@ -172,10 +281,10 @@ base AS (
         c.instrument_quote,
         c.instrument_usd,
         c.inst_usd_is_inverted,
-        COALESCE(rd.amt_filled, 0) AS amt_filled,
+        COALESCE(rd.amt_base, 0) AS amt_base,
         COALESCE(rd.amt_buy, 0) AS amt_buy,
         COALESCE(rd.amt_sell, 0) AS amt_sell,
-        COALESCE(rd.amt_matched, 0) AS amt_matched,
+        COALESCE(rd.amt_base_matched, 0) AS amt_base_matched,
         COALESCE(rd.px_buy, 0) AS px_buy,
         COALESCE(rd.px_sell, 0) AS px_sell,
         COALESCE(rd.num_deals, 0) AS num_deals,
@@ -211,334 +320,233 @@ base AS (
 SELECT * FROM base;
     """
 
-
     engine = _connect()
-
-    # Fetch previous day's cumulative values
-    prev_cumsum = _get_previous_day_cumsum(engine, date_str)
-
+    prev_cumsum = _get_prev_cumsum(engine, date_str)
     df = pd.read_sql(insert_sql, engine)
     engine.dispose()
 
     print(f"Retrieved {len(df)} rows for date {date_str}")
 
-    # Initialize columns
-    df['px_base'] = np.nan
-    df['px_quote'] = np.nan
-    df['rpnl_intra'] = 0.0
-    df['rpnl_intra_usd'] = 0.0
-    df['vol_usd'] = 0.0
+    # Sort data by instrument and timestamp
+    df = df.sort_values(['instrument', 'ts'])
 
-# Precompute 
-    amt = df['amt_filled'].fillna(0)
-    long = amt > 0
-    short = amt < 0
+    # Precompute common masks and variables
+    amt = df['amt_base'].fillna(0)
     inv = df['inst_usd_is_inverted']
-    has_usd   = df['instrument_usd'].notna()
-    
-# Column PX
+    has_usd = df['instrument_usd'].notna()
+    pos = _get_position_conditions(amt)
+
+    # Forward-fill and prepare price columns
+    usd_bid = _forward_fill_by_instrument(df, df['px_bid_0_usd'].replace(0, np.nan))
+    usd_ask = _forward_fill_by_instrument(df, df['px_ask_0_usd'].replace(0, np.nan))
+    base_bid = _forward_fill_by_instrument(df, df['px_bid_0_base'].replace(0, np.nan))
+    base_ask = _forward_fill_by_instrument(df, df['px_ask_0_base'].replace(0, np.nan))
+    quote_bid = _forward_fill_by_instrument(df, df['px_bid_0_quote'].replace(0, np.nan))
+    quote_ask = _forward_fill_by_instrument(df, df['px_ask_0_quote'].replace(0, np.nan))
+
+    # ---------------------------------------------------------------------------
+    # Price calculations
+    # ---------------------------------------------------------------------------
     df['px'] = np.where(amt > 0, df['px_buy'], np.where(amt < 0, df['px_sell'], np.nan))
 
-# Column PX_BASE - calculate from quote reference prices
-    ask_q = df['px_ask_0_quote'].replace(0, np.nan)
-    bid_q = df['px_bid_0_quote'].replace(0, np.nan)
+    # PX_BASE - calculate from quote reference prices
+    df['px_base'] = np.nan
+    df.loc[pos['long'] & ~inv, 'px_base'] = df['px_buy'] / quote_bid
+    df.loc[pos['long'] & inv, 'px_base'] = df['px_buy'] * quote_bid
+    df.loc[pos['short'] & ~inv, 'px_base'] = df['px_sell'] / quote_ask
+    df.loc[pos['short'] & inv, 'px_base'] = df['px_sell'] * quote_ask
 
-    df.loc[long & ~inv, 'px_base']  = df['px_buy'] / bid_q
-    df.loc[long &  inv, 'px_base']  = df['px_buy'] * bid_q
-    df.loc[short & ~inv, 'px_base'] = df['px_sell'] / ask_q
-    df.loc[short &  inv, 'px_base'] = df['px_sell'] * ask_q
-
-# Column PX_QUOTE - derive from reference px
+    # PX_QUOTE
+    df['px_quote'] = np.nan
     df.loc[~inv, 'px_quote'] = df['px'] / df['px_base']
-    df.loc[inv, 'px_quote']  = df['px_base'] / df['px']
+    df.loc[inv, 'px_quote'] = df['px_base'] / df['px']
 
-# Column RPNL_INTRA
+    # ---------------------------------------------------------------------------
+    # Intrabucket realized PnL
+    # ---------------------------------------------------------------------------
     mask = df['px_sell'].notna() & df['px_buy'].notna()
-    df.loc[mask, 'rpnl_intra'] = ((df['px_sell'] - df['px_buy']) * df['amt_matched'])
+    df['rpnl_intra'] = 0.0
+    df.loc[mask, 'rpnl_intra'] = ((df['px_sell'] - df['px_buy']) * df['amt_base_matched'])
 
-# Column RPNL_INTRA_USD
-    usd_bid = df['px_bid_0_usd'].replace(0, np.nan)
-    usd_ask = df['px_ask_0_usd'].replace(0, np.nan)
+    df['rpnl_usd'] = _convert_to_usd(df, df['rpnl_intra'], usd_bid, usd_ask, inv)
 
-    usd_bid = usd_bid.groupby(df['instrument']).ffill()
-    usd_ask = usd_ask.groupby(df['instrument']).ffill()
+    # ---------------------------------------------------------------------------
+    # Volume USD
+    # ---------------------------------------------------------------------------
+    usd_mid = (usd_bid + usd_ask) / 2
+    native_vol = df['amt_base'] * df['px']
+    df['vol_usd'] = _convert_to_usd(df, native_vol, usd_mid, usd_mid, inv, value_type='mid')
 
-    df['rpnl_usd'] = df['rpnl_intra'].copy()
-
-    positive = df['rpnl_intra'] > 0
-    negative = df['rpnl_intra'] < 0
-
-    df.loc[has_usd & ~inv & positive, 'rpnl_usd'] = df['rpnl_intra'] * usd_bid
-    df.loc[has_usd & ~inv & negative, 'rpnl_usd'] = df['rpnl_intra'] * usd_ask
-    df.loc[has_usd &  inv & positive, 'rpnl_usd'] = df['rpnl_intra'] / usd_bid
-    df.loc[has_usd &  inv & negative, 'rpnl_usd'] = df['rpnl_intra'] / usd_ask
-
-    df['rpnl_usd'] = df['rpnl_usd'].astype(float)
-
-# Column VOL_USD
-    usd_mid = ((df['px_ask_0_usd'].fillna(0) + df['px_bid_0_usd'].fillna(0)) / 2)
-    usd_mid = usd_mid.replace(0, np.nan)
-
-    usd_mid = usd_mid.groupby(df['instrument']).ffill()
-
-    native_vol = df['amt_filled'] * df['px']
-    df['vol_usd'] = native_vol  # default: already USD when instrument_usd is NaN
-
-    df.loc[has_usd & ~inv, 'vol_usd'] = native_vol * usd_mid
-    df.loc[has_usd &  inv, 'vol_usd'] = native_vol / usd_mid
-
-    df['vol_usd'] = df['vol_usd'].astype(float)
-
-# Column COST_SIGNED_USD
-    px_buy_usd = df['px_buy'].copy()
-    px_sell_usd = df['px_sell'].copy()
-
-    # Convert buy prices
-    px_buy_usd[has_usd & inv] = df['px_buy'][has_usd & inv] / usd_bid[has_usd & inv]
-    px_buy_usd[has_usd & ~inv] = df['px_buy'][has_usd & ~inv] * usd_bid[has_usd & ~inv]
-
-    # Convert sell prices
-    px_sell_usd[has_usd & inv] = df['px_sell'][has_usd & inv] / usd_ask[has_usd & inv]
-    px_sell_usd[has_usd & ~inv] = df['px_sell'][has_usd & ~inv] * usd_ask[has_usd & ~inv]
-
-    # Compute signed cost
-    df['cost_signed_usd'] = df['amt_buy'] * px_buy_usd - df['amt_sell'] * px_sell_usd
-
-    # Default zero where both buy and sell are zero
-    df['cost_signed_usd'] = df['cost_signed_usd'].fillna(0.0).astype(float)
-
-# Column COST_SIGNED_BASE - track USD-equivalent value of base leg positions
-    # We need to track the USD cost of base currency flows AT THE TIME OF TRADE
-    base_bid = df['px_bid_0_base'].replace(0, np.nan)
-    base_ask = df['px_ask_0_base'].replace(0, np.nan)
-
-    # Forward-fill missing prices - these are used for ENTRY valuation
-    base_bid_filled = base_bid.groupby(df['instrument']).ffill()
-    base_ask_filled = base_ask.groupby(df['instrument']).ffill()
-
+    # ---------------------------------------------------------------------------
+    # Cost calculations
+    # ---------------------------------------------------------------------------
     mask_buy = df['amt_buy'] > 0
     mask_sell = df['amt_sell'] > 0
 
-    # When we BUY amt_buy units of ETH/EUR:
-    # - USD cost of this base AT ENTRY: amt_buy * base_bid_usd (at time of trade)
-    # Use the actual base_bid at time of trade (not forward-filled)
-    df['cost_signed_base'] = 0.0
-    df.loc[mask_buy, 'cost_signed_base'] = df.loc[mask_buy, 'amt_buy'] * base_bid_filled[mask_buy]
-    df.loc[mask_sell, 'cost_signed_base'] -= df.loc[mask_sell, 'amt_sell'] * base_ask_filled[mask_sell]
+    # Convert buy/sell prices to USD
+    px_buy_usd = df['px_buy'].copy()
+    px_sell_usd = df['px_sell'].copy()
+    px_buy_usd[has_usd & inv] = df['px_buy'][has_usd & inv] / usd_bid[has_usd & inv]
+    px_buy_usd[has_usd & ~inv] = df['px_buy'][has_usd & ~inv] * usd_bid[has_usd & ~inv]
+    px_sell_usd[has_usd & inv] = df['px_sell'][has_usd & inv] / usd_ask[has_usd & inv]
+    px_sell_usd[has_usd & ~inv] = df['px_sell'][has_usd & ~inv] * usd_ask[has_usd & ~inv]
 
+    # Signed costs
+    df['cost_signed_usd'] = (df['amt_buy'] * px_buy_usd - df['amt_sell'] * px_sell_usd).fillna(0.0).astype(float)
+
+    df['cost_signed_base'] = 0.0
+    df.loc[mask_buy, 'cost_signed_base'] = df.loc[mask_buy, 'amt_buy'] * base_bid[mask_buy]
+    df.loc[mask_sell, 'cost_signed_base'] -= df.loc[mask_sell, 'amt_sell'] * base_ask[mask_sell]
     df['cost_signed_base'] = df['cost_signed_base'].fillna(0.0).astype(float)
 
-# Column COST_SIGNED_QUOTE - track USD-equivalent value of quote leg positions
-    # Quote leg: when we buy/sell the instrument, we spend/receive quote currency
-    # We need to track the USD cost of these quote currency flows AT THE TIME OF TRADE
-
-    quote_bid = df['px_bid_0_quote'].replace(0, np.nan)
-    quote_ask = df['px_ask_0_quote'].replace(0, np.nan)
-
-    # Forward-fill missing prices - these are used for ENTRY valuation
-    quote_bid_filled = quote_bid.groupby(df['instrument']).ffill()
-    quote_ask_filled = quote_ask.groupby(df['instrument']).ffill()
-
-    # When we BUY amt_buy units of ETH/EUR at px_buy EUR per ETH:
-    # - We spend (amt_buy * px_buy) EUR (quote currency)
-    # - USD cost of this quote AT ENTRY: (amt_buy * px_buy) * quote_bid_usd (at time of trade)
-    # - This is NEGATIVE because we're spending (reducing) our quote holdings
     df['cost_signed_quote'] = 0.0
-    df.loc[mask_buy, 'cost_signed_quote'] = -(df.loc[mask_buy, 'amt_buy'] * df.loc[mask_buy, 'px_buy']) * quote_bid_filled[mask_buy]
-    df.loc[mask_sell, 'cost_signed_quote'] += (df.loc[mask_sell, 'amt_sell'] * df.loc[mask_sell, 'px_sell']) * quote_ask_filled[mask_sell]
-
+    df.loc[mask_buy, 'cost_signed_quote'] = -(df.loc[mask_buy, 'amt_buy'] * df.loc[mask_buy, 'px_buy']) * quote_bid[mask_buy]
+    df.loc[mask_sell, 'cost_signed_quote'] += (df.loc[mask_sell, 'amt_sell'] * df.loc[mask_sell, 'px_sell']) * quote_ask[mask_sell]
     df['cost_signed_quote'] = df['cost_signed_quote'].fillna(0.0).astype(float)
 
-#### Track cumulative quote amount in native currency
     df['quote_amt_signed'] = 0.0
     df.loc[mask_buy, 'quote_amt_signed'] = -(df['amt_buy'] * df['px_buy'])
     df.loc[mask_sell, 'quote_amt_signed'] = (df['amt_sell'] * df['px_sell'])
 
-#### Cumulative calculations: running sums per instrument
-    df = df.sort_values(['instrument', 'ts'])
+    df['cost_signed_native'] = 0.0
+    df.loc[mask_buy, 'cost_signed_native'] = df.loc[mask_buy, 'amt_buy'] * df.loc[mask_buy, 'px_buy']
+    df.loc[mask_sell, 'cost_signed_native'] -= df.loc[mask_sell, 'amt_sell'] * df.loc[mask_sell, 'px_sell']
 
-    # Initialize cumulative columns with previous day's final values
-    if not prev_cumsum.empty:
-        df['prev_day_cum_amt'] = df['instrument'].map(prev_cumsum['cum_amt']).fillna(0)
-        df['prev_day_cum_cost_usd'] = df['instrument'].map(prev_cumsum['cum_cost_usd']).fillna(0)
-        df['prev_day_cum_cost_base'] = df['instrument'].map(prev_cumsum['cum_cost_base']).fillna(0)
-        df['prev_day_cum_cost_quote'] = df['instrument'].map(prev_cumsum['cum_cost_quote']).fillna(0)
-        df['prev_day_cum_quote_amt'] = df['instrument'].map(prev_cumsum['cum_quote_amt']).fillna(0)
-    else:
-        df['prev_day_cum_amt'] = 0
-        df['prev_day_cum_cost_usd'] = 0
-        df['prev_day_cum_cost_base'] = 0
-        df['prev_day_cum_cost_quote'] = 0
-        df['prev_day_cum_quote_amt'] = 0
+    # ---------------------------------------------------------------------------
+    # Cumulative calculations
+    # ---------------------------------------------------------------------------
+    df = _compute_cumsum_with_carryover(df, prev_cumsum, {
+        'cum_amt': 'amt_base',
+        'cum_cost_usd': 'cost_signed_usd',
+        'cum_cost_base': 'cost_signed_base',
+        'cum_cost_quote': 'cost_signed_quote',
+        'cum_cost_native': 'cost_signed_native',
+        'cum_quote_amt': 'quote_amt_signed'
+    })
 
-    # Compute cumulative sums starting from previous day's values
-    df['cum_amt'] = df['prev_day_cum_amt'] + df.groupby('instrument')['amt_filled'].cumsum()
-    df['cum_cost_usd'] = df['prev_day_cum_cost_usd'] + df.groupby('instrument')['cost_signed_usd'].cumsum()
-    df['cum_cost_base'] = df['prev_day_cum_cost_base'] + df.groupby('instrument')['cost_signed_base'].cumsum()
-    df['cum_cost_quote'] = df['prev_day_cum_cost_quote'] + df.groupby('instrument')['cost_signed_quote'].cumsum()
-    df['cum_quote_amt'] = df['prev_day_cum_quote_amt'] + df.groupby('instrument')['quote_amt_signed'].cumsum()
+    # ---------------------------------------------------------------------------
+    # Instrument bid/ask in USD
+    # ---------------------------------------------------------------------------
+    df['instrument_bid_usd'] = df['px_bid_0'].copy()
+    df['instrument_ask_usd'] = df['px_ask_0'].copy()
 
-    # Drop temporary columns
-    df = df.drop(columns=['prev_day_cum_amt', 'prev_day_cum_cost_usd', 'prev_day_cum_cost_base',
-                          'prev_day_cum_cost_quote', 'prev_day_cum_quote_amt'])
-
-    # Lagged values: previous cumulative snapshot
-    df['prev_cum_amt'] = df.groupby('instrument')['cum_amt'].shift(1)
-    df['prev_cum_cost_usd'] = df.groupby('instrument')['cum_cost_usd'].shift(1)
-
-    # Average cost from previous position
-    avg_cost = df['prev_cum_cost_usd'] / df['prev_cum_amt']
-
-# Instrument bid/ask in USD
-    df['instrument_bid_usd'] = np.nan
-    df['instrument_ask_usd'] = np.nan
-
-    no_usd = df['instrument_usd'].isna()
-
-    df.loc[no_usd, 'instrument_bid_usd'] = df['px_bid_0']
-    df.loc[no_usd, 'instrument_ask_usd'] = df['px_ask_0']
+    usd_mid = (usd_bid + usd_ask) / 2
     df.loc[has_usd & inv, 'instrument_bid_usd'] = df['px_bid_0'] / usd_mid
     df.loc[has_usd & inv, 'instrument_ask_usd'] = df['px_ask_0'] / usd_mid
     df.loc[has_usd & ~inv, 'instrument_bid_usd'] = df['px_bid_0'] * usd_mid
     df.loc[has_usd & ~inv, 'instrument_ask_usd'] = df['px_ask_0'] * usd_mid
 
-    # Forward-fill NaN values per instrument
-    df['instrument_bid_usd'] = df.groupby('instrument')['instrument_bid_usd'].ffill()
-    df['instrument_ask_usd'] = df.groupby('instrument')['instrument_ask_usd'].ffill()
+    df['instrument_bid_usd'] = _forward_fill_by_instrument(df, df['instrument_bid_usd'])
+    df['instrument_ask_usd'] = _forward_fill_by_instrument(df, df['instrument_ask_usd'])
 
-    instrument_bid_usd = df['instrument_bid_usd']
-    instrument_ask_usd = df['instrument_ask_usd']
+    # ---------------------------------------------------------------------------
+    # Realized PnL (instrument leg)
+    # ---------------------------------------------------------------------------
+    prev_cum_amt = df.groupby('instrument')['cum_amt'].shift(1)
+    prev_long = prev_cum_amt > 0
+    market_px_usd = np.where(prev_long, df['instrument_bid_usd'], df['instrument_ask_usd'])
 
-# Column RPNL_USD_TOTAL - realized PnL from position reductions/flips
-    df['rpnl_usd_total'] = df['rpnl_usd'].copy()
-
-    # Precompute position conditions
-    prev_long = df['prev_cum_amt'] > 0
-    prev_short = df['prev_cum_amt'] < 0
-    prev_flat = df['prev_cum_amt'].isna() | (df['prev_cum_amt'] == 0)
-
-    curr_long = df['cum_amt'] > 0
-    curr_short = df['cum_amt'] < 0
-    curr_flat = df['cum_amt'] == 0
-
-    # Position closed or flipped
-    closed_or_flipped = curr_flat | ((prev_long & curr_short) | (prev_short & curr_long))
-
-    # Position reduced (same sign, smaller absolute value)
-    reduced = ((prev_long & curr_long) | (prev_short & curr_short)) & (np.abs(df['cum_amt']) < np.abs(df['prev_cum_amt']))
-
-    # Market price to use for closing positions
-    market_px_usd = np.where(prev_long, instrument_bid_usd, instrument_ask_usd)
-
-    # Closed/flipped: realize entire previous position
-    df.loc[closed_or_flipped & ~prev_flat, 'rpnl_usd_total'] = (
-        df['rpnl_usd'] + df['prev_cum_amt'] * (market_px_usd - avg_cost)
+    df['rpnl_usd_total'] = _calculate_realized_pnl(
+        df, 'cum_amt', 'cum_cost_usd', market_px_usd, df['rpnl_usd']
     )
 
-    # Reduced: realize the reduction
-    df.loc[reduced, 'rpnl_usd_total'] = (
-        df['rpnl_usd'] + (df['prev_cum_amt'] - df['cum_amt']) * (market_px_usd - avg_cost)
-    )
+    # ---------------------------------------------------------------------------
+    # Cumulative volume and realized PnL
+    # ---------------------------------------------------------------------------
+    df = _compute_cumsum_with_carryover(df, prev_cumsum, {
+        'cum_vol_usd': 'vol_usd',
+        'cum_rpnl_usd': 'rpnl_usd_total'
+    })
 
-    df['rpnl_usd_total'] = df['rpnl_usd_total'].astype(float)
+    # ---------------------------------------------------------------------------
+    # Unrealized PnL (instrument leg)
+    # ---------------------------------------------------------------------------
+    curr_pos = _get_position_conditions(df['cum_amt'])
 
-# Column CUM_VOL_USD, CUM_RPNL_USD
-    # Add previous day's cumulative values
-    if not prev_cumsum.empty:
-        df['prev_day_cum_vol_usd'] = df['instrument'].map(prev_cumsum['cum_vol_usd']).fillna(0)
-        df['prev_day_cum_rpnl_usd'] = df['instrument'].map(prev_cumsum['cum_rpnl_usd']).fillna(0)
-    else:
-        df['prev_day_cum_vol_usd'] = 0
-        df['prev_day_cum_rpnl_usd'] = 0
-
-    df['cum_vol_usd'] = df['prev_day_cum_vol_usd'] + df.groupby('instrument')['vol_usd'].cumsum()
-    df['cum_rpnl_usd'] = df['prev_day_cum_rpnl_usd'] + df.groupby('instrument')['rpnl_usd_total'].cumsum()
-
-    # Drop temporary columns
-    df = df.drop(columns=['prev_day_cum_vol_usd', 'prev_day_cum_rpnl_usd'])
-
-# Column UPNL_USD - unrealized PnL in USD
-    # Average cost of current position (handle division by zero)
-    avg_cost_current = np.where(
+    avg_cost_native = np.where(
         np.abs(df['cum_amt']) < 1e-10,
         0,
-        df['cum_cost_usd'] / df['cum_amt']
+        df['cum_cost_native'] / df['cum_amt']
     )
 
-    df['upnl_usd'] = 0.0
-    df.loc[curr_long, 'upnl_usd'] = df['cum_amt'] * (instrument_bid_usd - avg_cost_current)
-    df.loc[curr_short, 'upnl_usd'] = df['cum_amt'] * (instrument_ask_usd - avg_cost_current)
-    df['upnl_usd'] = df['upnl_usd'].astype(float)
+    df['upnl_native'] = 0.0
+    df.loc[curr_pos['long'], 'upnl_native'] = df['cum_amt'] * (df['px_bid_0'] - avg_cost_native)
+    df.loc[curr_pos['short'], 'upnl_native'] = df['cum_amt'] * (df['px_ask_0'] - avg_cost_native)
 
-# Column UPNL_BASE - unrealized PnL in base leg (USD terms)
-    # Get CURRENT market prices for base (not entry prices)
-    base_bid_current = df['px_bid_0_base'].replace(0, np.nan).groupby(df['instrument']).ffill()
-    base_ask_current = df['px_ask_0_base'].replace(0, np.nan).groupby(df['instrument']).ffill()
+    df['upnl_usd'] = _convert_to_usd(df, df['upnl_native'], usd_bid, usd_ask, inv)
 
-    # For long: value at bid (what we could sell for)
-    # For short: value at ask (what we'd need to buy to cover)
+    # ---------------------------------------------------------------------------
+    # Unrealized PnL (base leg)
+    # ---------------------------------------------------------------------------
     base_market_value_usd = np.where(
-        curr_long,
-        df['cum_amt'] * base_bid_current,
-        np.where(
-            curr_short,
-            df['cum_amt'] * base_ask_current,
-            0
-        )
+        curr_pos['long'],
+        df['cum_amt'] * base_bid,
+        np.where(curr_pos['short'], df['cum_amt'] * base_ask, 0)
+    )
+    df['upnl_base'] = (base_market_value_usd - df['cum_cost_base']).astype(float)
+
+    # ---------------------------------------------------------------------------
+    # Realized PnL (quote leg)
+    # ---------------------------------------------------------------------------
+    # Convert intraday rpnl_intra to USD
+    rpnl_intra_usd = df['rpnl_intra'].copy()
+    rpnl_pos = df['rpnl_intra'] > 0
+    rpnl_neg = df['rpnl_intra'] < 0
+    rpnl_intra_usd[rpnl_pos] = df['rpnl_intra'][rpnl_pos] * quote_bid[rpnl_pos]
+    rpnl_intra_usd[rpnl_neg] = df['rpnl_intra'][rpnl_neg] * quote_ask[rpnl_neg]
+    rpnl_intra_usd = rpnl_intra_usd.fillna(0.0)
+
+    # Calculate quote market price
+    prev_cum_quote = df.groupby('instrument')['cum_quote_amt'].shift(1)
+    prev_quote_long = prev_cum_quote > 0
+    quote_market_px_usd = np.where(prev_quote_long, quote_bid, quote_ask)
+
+    df['rpnl_quote_total'] = _calculate_realized_pnl(
+        df, 'cum_quote_amt', 'cum_cost_quote', quote_market_px_usd, rpnl_intra_usd
     )
 
-    df['upnl_base'] = base_market_value_usd - df['cum_cost_base']
-    df['upnl_base'] = df['upnl_base'].astype(float)
+    df['cum_rpnl_quote'] = df.groupby('instrument')['rpnl_quote_total'].cumsum().astype(float)
 
-# Column UPNL_QUOTE - unrealized PnL in quote leg (USD terms)
-    # Get CURRENT market prices for quote (not entry prices)
-    quote_bid_current = df['px_bid_0_quote'].replace(0, np.nan).groupby(df['instrument']).ffill()
-    quote_ask_current = df['px_ask_0_quote'].replace(0, np.nan).groupby(df['instrument']).ffill()
-
-    # The quote amount is in cum_quote_amt (in native quote currency)
-    # Current value in USD depends on position direction:
-    # - If long instrument (short quote): use ask to value what we'd need to pay
-    # - If short instrument (long quote): use bid to value what we could sell for
+    # ---------------------------------------------------------------------------
+    # Total and unrealized PnL (quote leg)
+    # ---------------------------------------------------------------------------
     quote_market_value_usd = np.where(
-        curr_long,
-        df['cum_quote_amt'] * quote_ask_current,  # negative amount * quote_ask
-        np.where(
-            curr_short,
-            df['cum_quote_amt'] * quote_bid_current,  # positive amount * quote_bid
-            0
-        )
+        df['cum_quote_amt'] < 0,
+        df['cum_quote_amt'] * quote_ask,
+        np.where(df['cum_quote_amt'] > 0, df['cum_quote_amt'] * quote_bid, 0)
     )
 
-    df['upnl_quote'] = quote_market_value_usd - df['cum_cost_quote']
-    df['upnl_quote'] = df['upnl_quote'].astype(float)
+    df['tpnl_quote'] = (quote_market_value_usd - df['cum_cost_quote']).astype(float)
+    df['upnl_quote'] = (df['tpnl_quote'] - df['cum_rpnl_quote']).astype(float)
 
-# Column TPNL_USD, TPNL_QUOTE - total PnL
+    # ---------------------------------------------------------------------------
+    # Total PnL
+    # ---------------------------------------------------------------------------
     df['tpnl_usd'] = df['cum_rpnl_usd'] + df['upnl_usd']
-    df['tpnl_quote'] = df['rpnl_intra'] + df['upnl_quote']
 
     return df
+
 
 def _update(date_str: str):
     """Process data for a given date and push to QuestDB via ILP."""
     print(f"Updating mart for {date_str}")
 
-    # Process the data
     df = _process(date_str)
 
-    # Select only the columns we want to insert
+    # Select and prepare columns for insertion
     key_cols = ['ts', 'instrument', 'instrument_base', 'instrument_quote',
-                'amt_filled', 'px', 'px_quote', 'px_base', 'vol_usd', 'num_deals',
-                'cum_amt', 'cum_cost_usd', 'cum_cost_base', 'cum_cost_quote', 'cum_quote_amt', 'cum_vol_usd',
-                'rpnl_usd_total', 'cum_rpnl_usd',
+                'amt_base', 'px', 'px_quote', 'px_base', 'vol_usd', 'num_deals',
+                'cum_amt', 'cum_cost_usd', 'cum_cost_base', 'cum_cost_quote', 'cum_cost_native', 'cum_quote_amt', 'cum_vol_usd',
+                'rpnl_usd_total', 'cum_rpnl_usd', 'cum_rpnl_quote',
                 'upnl_usd', 'upnl_base', 'upnl_quote', 'tpnl_usd', 'tpnl_quote']
 
     df_to_insert = df[key_cols].copy()
 
-    # Prepare data: fill NaNs and ensure correct types
+    # Prepare data types
     symbol_cols = ['instrument', 'instrument_base', 'instrument_quote']
-    float_cols = ['amt_filled', 'px', 'px_quote', 'px_base', 'vol_usd',
-                  'cum_amt', 'cum_cost_usd', 'cum_cost_base', 'cum_cost_quote', 'cum_quote_amt', 'cum_vol_usd',
-                  'rpnl_usd_total', 'cum_rpnl_usd',
+    float_cols = ['amt_base', 'px', 'px_quote', 'px_base', 'vol_usd',
+                  'cum_amt', 'cum_cost_usd', 'cum_cost_base', 'cum_cost_quote', 'cum_cost_native', 'cum_quote_amt', 'cum_vol_usd',
+                  'rpnl_usd_total', 'cum_rpnl_usd', 'cum_rpnl_quote',
                   'upnl_usd', 'upnl_base', 'upnl_quote', 'tpnl_usd', 'tpnl_quote']
     int_cols = ['num_deals']
 
@@ -548,7 +556,7 @@ def _update(date_str: str):
 
     print(f"Inserting {len(df_to_insert)} rows to {MART_TABLE}")
 
-    # Connect to QuestDB via ILP
+    # Insert via ILP
     try:
         conf = f'tcp::addr={QUESTDB_HOST}:9009;'
         with Sender.from_conf(conf) as sender:
@@ -563,7 +571,7 @@ def _update(date_str: str):
                         'instrument_quote': row['instrument_quote'] if row['instrument_quote'] != 'nan' else None
                     },
                     columns={
-                        'amt_filled': row['amt_filled'],
+                        'amt_base': row['amt_base'],
                         'px': row['px'],
                         'px_quote': row['px_quote'],
                         'px_base': row['px_base'],
@@ -573,10 +581,12 @@ def _update(date_str: str):
                         'cum_cost_usd': row['cum_cost_usd'],
                         'cum_cost_base': row['cum_cost_base'],
                         'cum_cost_quote': row['cum_cost_quote'],
+                        'cum_cost_native': row['cum_cost_native'],
                         'cum_quote_amt': row['cum_quote_amt'],
                         'cum_vol_usd': row['cum_vol_usd'],
                         'rpnl_usd_total': row['rpnl_usd_total'],
                         'cum_rpnl_usd': row['cum_rpnl_usd'],
+                        'cum_rpnl_quote': row['cum_rpnl_quote'],
                         'upnl_usd': row['upnl_usd'],
                         'upnl_base': row['upnl_base'],
                         'upnl_quote': row['upnl_quote'],
@@ -594,51 +604,27 @@ def _update(date_str: str):
         print(f"Error inserting data via ILP: {e}")
         raise
 
+
 if __name__ == "__main__":
-    def test_carryover():
-        # Test cumsum carryover across days
-        print("\n" + "="*80)
-        print("TESTING CUMSUM CARRYOVER ACROSS DAYS")
-        print("="*80)
+    # for date_str in [
+    # "2025-10-20",
+    # "2025-10-21", "2025-10-22", "2025-10-23",
+    # "2025-10-24", "2025-10-25", "2025-10-26",
+    # "2025-10-27", "2025-10-28", "2025-10-29",
+    # "2025-10-30"]:
+    #     _update(date_str)
 
-        # Process two consecutive days
-        df_day1 = _process("2025-10-20")
-        df_day2 = _process("2025-10-21")
-
-        print("\n--- Day 1 (2025-10-20) Final Cumsum Values ---")
-        cumsum_cols = ['instrument', 'cum_amt', 'cum_cost_usd', 'cum_vol_usd', 'cum_rpnl_usd']
-        day1_final = df_day1[df_day1.amt_filled != 0].groupby('instrument')[cumsum_cols].last()
-        print(day1_final.head(10))
-
-        print("\n--- Day 2 (2025-10-21) Initial Cumsum Values (first trade per instrument) ---")
-        day2_initial = df_day2[df_day2.amt_filled != 0].groupby('instrument')[cumsum_cols].first()
-        print(day2_initial.head(10))
-
-        print("\n--- Verification: Day 2 Initial should continue from Day 1 Final ---")
-        # The first cumsum value of day2 should be: day1_final + day2_first_trade_delta
-        # To verify properly, we need to check if initial values loaded correctly
-        # Let's check a specific instrument
-        test_instruments = day1_final.head(3).index.tolist()
-        for inst in test_instruments:
-            if inst in day1_final.index and inst in day2_initial.index:
-                day1_final_amt = day1_final.loc[inst, 'cum_amt']
-                day2_initial_amt = day2_initial.loc[inst, 'cum_amt']
-                print(f"\n{inst}:")
-                print(f"  Day 1 final cum_amt: {day1_final_amt:.6f}")
-                print(f"  Day 2 first trade cum_amt: {day2_initial_amt:.6f}")
-                print(f"  Carryover working!" if day2_initial_amt > day1_final_amt or abs(day2_initial_amt - day1_final_amt) < 1e-6 else "  ✗ ERROR: Reset detected!")
-
-        print("\n" + "="*80)
-        print("Running normal update process...")
-        print("="*80 + "\n")
-
-
-    for date_str in [
-    "2025-10-20", 
-    "2025-10-21", "2025-10-22", "2025-10-23", 
-    "2025-10-24", "2025-10-25", "2025-10-26", 
-    "2025-10-27", "2025-10-28", "2025-10-29", 
-    "2025-10-30"]:
-        _update(date_str)
-
-    # test_carryover()
+    df = _process("2025-10-20")
+    cols = ['ts', 'instrument', 'amt_base', 'amt_buy',
+       'amt_sell', 'amt_base_matched', 'px_buy', 'px_sell', 'num_deals',
+       'px_bid_0', 'px_ask_0', 'px_bid_0_base', 'px_ask_0_base',
+       'px_bid_0_quote', 'px_ask_0_quote', 'px_bid_0_usd', 'px_ask_0_usd',
+       'px', 'px_base', 'px_quote', 'rpnl_intra', 'rpnl_usd', 'vol_usd',
+       'cost_signed_usd', 'cost_signed_base', 'cost_signed_quote',
+       'quote_amt_signed', 'cost_signed_native', 'cum_amt', 'cum_cost_usd',
+       'cum_cost_base', 'cum_cost_quote', 'cum_cost_native', 'cum_quote_amt',
+       'instrument_bid_usd', 'instrument_ask_usd', 'rpnl_usd_total',
+       'cum_vol_usd', 'cum_rpnl_usd', 'upnl_native', 'upnl_usd', 'upnl_base',
+       'rpnl_quote_total', 'cum_rpnl_quote', 'tpnl_quote', 'upnl_quote', 'tpnl_usd']
+    print(df[cols].head(10))
+    print(df.columns)
